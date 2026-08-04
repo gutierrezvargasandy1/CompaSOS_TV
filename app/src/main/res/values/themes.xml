@@ -1,0 +1,4 @@
+<resources>
+
+    <style name="Theme.CompaSOS_TV" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>
