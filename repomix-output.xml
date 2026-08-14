@@ -1,0 +1,3020 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+app/
+  src/
+    main/
+      java/
+        com/
+          example/
+            compasos_tv/
+              config/
+                MqttConfig.kt
+                MqttManager.kt
+              data/
+                entitys/
+                  dao/
+                    AlertaTvDao.kt
+                    ConfigTvDao.kt
+                    FamiliarTvDao.kt
+                  AlertaTvEntity.kt
+                  AppDatabaseTv.kt
+                  ConfigTvEntity.kt
+                  FamiliarTvEntity.kt
+              Navigation/
+                TvNavigation.kt
+                TvScreen.kt
+              Screan/
+                TvAlertasScreen.kt
+                TvConfiguracionScreen.kt
+                TvDashboardScreen.kt
+                TvFamiliaScreen.kt
+                TvMainScreen.kt
+                VinculacionScreen.kt
+              services/
+                TvMqttService.kt
+                VinculacionTvRepository.kt
+              ui/
+                theme/
+                  Color.kt
+                  Theme.kt
+                  Type.kt
+              MainActivity.kt
+      keepRules/
+        rules.keep
+      res/
+        mipmap-hdpi/
+          ic_launcher.webp
+        mipmap-mdpi/
+          ic_launcher.webp
+        mipmap-xhdpi/
+          ic_launcher.webp
+        mipmap-xxhdpi/
+          ic_launcher.webp
+        mipmap-xxxhdpi/
+          ic_launcher.webp
+        values/
+          developer-config.xml
+          strings.xml
+          themes.xml
+      AndroidManifest.xml
+  .gitignore
+  build.gradle.kts
+gradle/
+  wrapper/
+    gradle-wrapper.jar
+    gradle-wrapper.properties
+  gradle-daemon-jvm.properties
+  libs.versions.toml
+.gitignore
+build.gradle.kts
+gradle.properties
+gradlew
+gradlew.bat
+settings.gradle.kts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="app/src/main/java/com/example/compasos_tv/config/MqttConfig.kt">
+package com.example.compasos_tv.config
+
+
+object MqttConfig {
+    const val BROKER_URL       = "tcp://192.168.1.22:1883"
+    const val TIMEOUT_CONEXION = 10
+    const val KEEP_ALIVE       = 60
+    const val QOS              = 1
+
+    // Topics TV ← teléfono
+    const val TOPIC_TV          = "compasos/tv"          // compasos/tv/{tvId}/sesion|alerta|ubicacion
+    const val TOPIC_VINCULACION = "compasos/vinculacion"  // compasos/vinculacion/tv/{tvId}/...
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/config/MqttManager.kt">
+package com.example.compasos_tv.config
+
+import android.util.Log
+import org.eclipse.paho.client.mqttv3.MqttClient
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions
+import org.eclipse.paho.client.mqttv3.MqttMessage
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
+
+class MqttManager {
+
+    private var client: MqttClient? = null
+
+    val estaConectado: Boolean get() = client?.isConnected == true
+
+    fun conectar() {
+        if (estaConectado) return
+        val clientId = "compasos_tv_${System.currentTimeMillis()}"
+        client = MqttClient(MqttConfig.BROKER_URL, clientId, MemoryPersistence())
+        client!!.connect(MqttConnectOptions().apply {
+            isCleanSession       = true
+            connectionTimeout    = MqttConfig.TIMEOUT_CONEXION
+            keepAliveInterval    = MqttConfig.KEEP_ALIVE
+            isAutomaticReconnect = true
+        })
+        Log.d("TvMqtt", "Conectado al broker")
+    }
+
+    fun publicar(topic: String, payload: String) {
+        val c = client ?: throw IllegalStateException("MQTT no conectado")
+        c.publish(topic, MqttMessage(payload.toByteArray()).apply { qos = MqttConfig.QOS })
+        Log.d("TvMqtt", "► [$topic]: $payload")
+    }
+
+    fun suscribir(topic: String, onMensaje: (String, String) -> Unit) {
+        val c = client ?: throw IllegalStateException("MQTT no conectado")
+        c.subscribe(topic, MqttConfig.QOS) { t, msg ->
+            val payload = String(msg.payload, Charsets.UTF_8)
+            Log.d("TvMqtt", "◄ [$t]: $payload")
+            onMensaje(t, payload)
+        }
+    }
+
+    fun desconectar() {
+        try { client?.takeIf { it.isConnected }?.disconnect() } catch (_: Exception) {}
+        client = null
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/AlertaTvDao.kt">
+package com.example.compasos_tv.data.entitys.dao
+
+import androidx.room.*
+import com.example.compasos_tv.data.entitys.AlertaTvEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface AlertaTvDao {
+
+    @Query("SELECT * FROM alertas_tv ORDER BY fecha DESC")
+    fun observarTodas(): Flow<List<AlertaTvEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertar(alerta: AlertaTvEntity)
+
+    @Query("UPDATE alertas_tv SET leida = 1 WHERE id = :id")
+    suspend fun marcarLeida(id: String)
+
+    @Query("SELECT COUNT(*) FROM alertas_tv WHERE leida = 0")
+    fun contarNoLeidas(): Flow<Int>
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/ConfigTvDao.kt">
+package com.example.compasos_tv.data.entitys.dao
+
+import androidx.room.*
+import com.example.compasos_tv.data.entitys.ConfigTvEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface ConfigTvDao {
+
+    @Query("SELECT * FROM config_tv WHERE id = 1")
+    fun observar(): Flow<ConfigTvEntity?>
+
+    @Query("SELECT * FROM config_tv WHERE id = 1")
+    suspend fun obtener(): ConfigTvEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun guardar(config: ConfigTvEntity)
+
+    @Query("UPDATE config_tv SET codigoVinculacion = :codigo WHERE id = 1")
+    suspend fun setCodigo(codigo: String)
+
+    @Query("""
+        UPDATE config_tv SET
+            vinculado          = 1,
+            usuarioIdVinculado = :usuarioId,
+            nombreUsuario      = :nombre,
+            emailUsuario       = :email,
+            codigoVinculacion  = '',
+            ultimaActualizacion = :ts
+        WHERE id = 1
+    """)
+    suspend fun confirmarVinculacion(usuarioId: String, nombre: String, email: String, ts: Long)
+
+    @Query("UPDATE config_tv SET vinculado = 0, usuarioIdVinculado = '' WHERE id = 1")
+    suspend fun desvincular()
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/FamiliarTvDao.kt">
+package com.example.compasos_tv.data.entitys.dao
+
+import androidx.room.*
+import com.example.compasos_tv.data.entitys.FamiliarTvEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface FamiliarTvDao {
+
+    // Flow reactivo → el mapa se actualiza automáticamente
+    @Query("SELECT * FROM familiares_tv")
+    fun observarTodos(): Flow<List<FamiliarTvEntity>>
+
+    @Query("SELECT * FROM familiares_tv")
+    suspend fun obtenerTodos(): List<FamiliarTvEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertar(familiar: FamiliarTvEntity)
+
+    // Actualizar solo la ubicación sin tocar el resto del perfil
+    @Query("""
+        UPDATE familiares_tv SET
+            latitud              = :lat,
+            longitud             = :lng,
+            ultimaUbicacionFecha = :fecha,
+            enLinea              = 1
+        WHERE usuarioId = :id
+    """)
+    suspend fun actualizarUbicacion(id: String, lat: Double, lng: Double, fecha: String)
+
+    @Query("DELETE FROM familiares_tv")
+    suspend fun limpiar()
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/AlertaTvEntity.kt">
+package com.example.compasos_tv.data.entitys
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * Alertas recibidas desde el teléfono vinculado.
+ * Solo visualización — la TV no genera alertas.
+ */
+@Entity(tableName = "alertas_tv")
+data class AlertaTvEntity(
+    @PrimaryKey
+    val id:           String,
+    val tipo:         String?  = null,
+    val descripcion:  String?  = null,
+    val emisorNombre: String?  = null,
+    val emisorId:     String?  = null,
+    val latitud:      Double?  = null,
+    val longitud:     Double?  = null,
+    val fecha:        String,
+    val leida:        Boolean  = false
+)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/AppDatabaseTv.kt">
+package com.example.compasos_tv.data.entitys
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import com.example.compasos_tv.data.entitys.dao.AlertaTvDao
+import com.example.compasos_tv.data.entitys.dao.ConfigTvDao
+import com.example.compasos_tv.data.entitys.dao.FamiliarTvDao
+
+@Database(
+    entities = [
+        ConfigTvEntity::class,
+        FamiliarTvEntity::class,
+        AlertaTvEntity::class
+    ],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDatabaseTv : RoomDatabase() {
+
+    abstract fun configTvDao(): ConfigTvDao
+    abstract fun familiarTvDao(): FamiliarTvDao
+    abstract fun alertaTvDao(): AlertaTvDao
+
+    companion object {
+        @Volatile private var INSTANCE: AppDatabaseTv? = null
+
+        fun getInstance(context: Context): AppDatabaseTv =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabaseTv::class.java,
+                    "compasos_tv.db"
+                ).build().also { INSTANCE = it }
+            }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/ConfigTvEntity.kt">
+package com.example.compasos_tv.data.entitys
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * Configuración y sesión vinculada.
+ * Es un singleton (id = 1 siempre).
+ */
+@Entity(tableName = "config_tv")
+data class ConfigTvEntity(
+    @PrimaryKey
+    val id:                   Int     = 1,
+    val tvDeviceId:           String  = "",
+    val codigoVinculacion:    String  = "",
+    val usuarioIdVinculado:   String  = "",
+    val nombreUsuario:        String  = "",
+    val emailUsuario:         String  = "",
+    val vinculado:            Boolean = false,
+    val ultimaActualizacion:  Long    = 0L
+)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/FamiliarTvEntity.kt">
+package com.example.compasos_tv.data.entitys
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * Integrante de la familia con su última ubicación conocida.
+ * El teléfono actualiza estos datos periódicamente vía MQTT.
+ */
+@Entity(tableName = "familiares_tv")
+data class FamiliarTvEntity(
+    @PrimaryKey
+    val usuarioId:           String,
+    val nombre:              String,
+    val apellido:            String?  = null,
+    val latitud:             Double?  = null,
+    val longitud:            Double?  = null,
+    val ultimaUbicacionFecha: String? = null,
+    val enLinea:             Boolean  = false
+)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvNavigation.kt">
+package com.example.compasos_tv.Navigation
+
+import androidx.compose.runtime.Composable
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.example.compasos_tv.Screan.*
+
+@Composable
+fun TvNavigation() {
+    val navController = rememberNavController()
+
+    NavHost(
+        navController    = navController,
+        startDestination = TvScreen.Vinculacion.route
+    ) {
+        // ── Vinculación — siempre es el punto de entrada ──────────────────────
+        // La propia pantalla redirige al Dashboard si ya estaba vinculado
+        composable(TvScreen.Vinculacion.route) {
+            VinculacionScreen(
+                onVinculado = {
+                    navController.navigate(TvScreen.Dashboard.route) {
+                        popUpTo(TvScreen.Vinculacion.route) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        // ── Dashboard — mapa sin padding para que ocupe todo el área ──────────
+        composable(TvScreen.Dashboard.route) {
+            TvMainScreen(
+                navController    = navController,
+                rutaSeleccionada = TvScreen.Dashboard.route,
+                padContent       = false          // el mapa ocupa todo el espacio
+            ) {
+                TvDashboardScreen()
+            }
+        }
+
+        composable(TvScreen.AlertasRecibidas.route) {
+            TvMainScreen(navController, TvScreen.AlertasRecibidas.route) {
+                TvAlertasScreen()
+            }
+        }
+
+        composable(TvScreen.FamiliaEnLinea.route) {
+            TvMainScreen(navController, TvScreen.FamiliaEnLinea.route) {
+                TvFamiliaScreen()
+            }
+        }
+
+        composable(TvScreen.Configuracion.route) {
+            TvMainScreen(navController, TvScreen.Configuracion.route) {
+                TvConfiguracionScreen(
+                    onDesvincular = {
+                        navController.navigate(TvScreen.Vinculacion.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvScreen.kt">
+package com.example.compasos_tv.Navigation
+
+sealed class TvScreen(val route: String, val titulo: String) {
+    object Vinculacion      : TvScreen("tv_vinculacion",        "Vincular")
+    object Dashboard        : TvScreen("tv_dashboard",          "Inicio")
+    object AlertasRecibidas : TvScreen("tv_alertas_recibidas",  "Alertas")
+    object FamiliaEnLinea   : TvScreen("tv_familia",            "Familia")
+    object Configuracion    : TvScreen("tv_configuracion",      "Configuración")
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvAlertasScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.app.Application
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import com.example.compasos_tv.data.entitys.AlertaTvEntity
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import kotlinx.coroutines.launch
+
+private val ACard       = Color(0xFF0F1629)
+private val ACardNueva  = Color(0xFF0F1E2E)
+private val ATexto      = Color(0xFFE0E0E0)
+private val ASecund     = Color(0xFF9E9E9E)
+private val ARojo       = Color(0xFFE53935)
+private val AAzulFoco   = Color(0xFF1976D2)
+
+// ── ViewModel ─────────────────────────────────────────────────────────────────
+
+class TvAlertasViewModel(app: Application) : AndroidViewModel(app) {
+    private val db = AppDatabaseTv.getInstance(app)
+    val alertas    = db.alertaTvDao().observarTodas()
+    val noLeidas   = db.alertaTvDao().contarNoLeidas()
+
+    fun marcarLeida(id: String) {
+        viewModelScope.launch { db.alertaTvDao().marcarLeida(id) }
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            TvAlertasViewModel(app) as T
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvAlertasScreen() {
+    val context = LocalContext.current
+    val vm: TvAlertasViewModel = viewModel(
+        factory = TvAlertasViewModel.Factory(context.applicationContext as Application)
+    )
+    val alertas  by vm.alertas.collectAsState(initial = emptyList())
+    val noLeidas by vm.noLeidas.collectAsState(initial = 0)
+
+    Column(
+        modifier            = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Cabecera
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(Icons.Default.Notifications, null, tint = ARojo, modifier = Modifier.size(30.dp))
+            Text("Alertas de emergencia", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = ATexto)
+            if (noLeidas > 0) {
+                Box(
+                    modifier = Modifier
+                        .background(ARojo, CircleShape)
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        "$noLeidas nueva${if (noLeidas > 1) "s" else ""}",
+                        fontSize   = 12.sp,
+                        color      = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        if (alertas.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(Icons.Default.Notifications, null, tint = ASecund, modifier = Modifier.size(64.dp))
+                    Text("Sin alertas registradas", fontSize = 20.sp, color = ATexto, fontWeight = FontWeight.SemiBold)
+                    Text("Las alertas de tus familiares aparecerán aquí", fontSize = 14.sp, color = ASecund)
+                }
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(items = alertas, key = { it.id }) { alerta ->
+                    AlertaTvCard(alerta = alerta, onClick = { vm.marcarLeida(alerta.id) })
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun AlertaTvCard(alerta: AlertaTvEntity, onClick: () -> Unit) {
+    var tieneFoco by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (!alerta.leida) ACardNueva else ACard)
+            .border(
+                1.5.dp,
+                when {
+                    tieneFoco     -> AAzulFoco
+                    !alerta.leida -> ARojo.copy(alpha = 0.5f)
+                    else          -> Color.Transparent
+                },
+                RoundedCornerShape(14.dp)
+            )
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+            .padding(20.dp),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(50.dp).background(ARojo.copy(alpha = 0.15f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.Warning, null, tint = ARojo, modifier = Modifier.size(26.dp))
+        }
+
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(alerta.tipo ?: "SOS", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = ARojo)
+                if (!alerta.leida) {
+                    Box(
+                        modifier = Modifier
+                            .background(ARojo, RoundedCornerShape(20.dp))
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text("NUEVA", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+            }
+            alerta.emisorNombre?.let { Text("De: $it", fontSize = 14.sp, color = ATexto) }
+            alerta.descripcion?.let  { Text(it, fontSize = 13.sp, color = ASecund) }
+            if (alerta.latitud != null && alerta.longitud != null) {
+                Text("📍 %.4f, %.4f".format(alerta.latitud, alerta.longitud), fontSize = 12.sp, color = ASecund)
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.End) {
+            Text(alerta.fecha.take(10), fontSize = 12.sp, color = ASecund)
+            Text(alerta.fecha.drop(11).take(5), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = ATexto)
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvConfiguracionScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.app.Application
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.DevicesOther
+import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import com.example.compasos_tv.services.VinculacionTvRepository
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
+
+private val CCard    = Color(0xFF0F1629)
+private val CTexto   = Color(0xFFE0E0E0)
+private val CSecund  = Color(0xFF9E9E9E)
+private val CAzul    = Color(0xFF1565C0)
+private val CAzulF   = Color(0xFF1976D2)
+private val CRojo    = Color(0xFFE53935)
+
+// ── ViewModel ─────────────────────────────────────────────────────────────────
+
+class TvConfigViewModel(app: Application) : AndroidViewModel(app) {
+    private val repo = VinculacionTvRepository(app)
+    val config       = repo.observarConfig()
+
+    fun desvincular(onListo: () -> Unit) {
+        viewModelScope.launch {
+            repo.desvincular()
+            onListo()
+        }
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            TvConfigViewModel(app) as T
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvConfiguracionScreen(onDesvincular: () -> Unit) {
+    val context = LocalContext.current
+    val vm: TvConfigViewModel = viewModel(
+        factory = TvConfigViewModel.Factory(context.applicationContext as Application)
+    )
+    val config by vm.config.collectAsState(initial = null)
+    val tvId   = remember {
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }
+    var confirmar by remember { mutableStateOf(false) }
+
+    Row(
+        modifier              = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(32.dp)
+    ) {
+        // ── Info del dispositivo + cuenta ──────────────────────────────────────
+        Column(
+            modifier            = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier              = Modifier.padding(bottom = 8.dp)
+            ) {
+                Icon(Icons.Default.Settings, null, tint = CAzul, modifier = Modifier.size(28.dp))
+                Text("Configuración", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = CTexto)
+            }
+
+            // Dispositivo
+            SeccionInfo("Dispositivo TV") {
+                FilaInfo(Icons.Default.Tv,           "Tipo",    "Android TV")
+                FilaInfo(Icons.Default.DevicesOther, "Modelo",  Build.MODEL)
+                FilaInfo(Icons.Default.DevicesOther, "ID",      "tv_$tvId")
+                FilaInfo(Icons.Default.DevicesOther, "Android", "API ${Build.VERSION.SDK_INT}")
+            }
+
+            // Cuenta vinculada
+            SeccionInfo("Cuenta vinculada") {
+                if (config?.vinculado == true) {
+                    FilaInfo(Icons.Default.AccountCircle, "Nombre",  config?.nombreUsuario ?: "-")
+                    FilaInfo(Icons.Default.AccountCircle, "Correo",  config?.emailUsuario  ?: "-")
+                    FilaInfo(Icons.Default.AccountCircle, "Usuario", config?.usuarioIdVinculado ?: "-")
+                    config?.ultimaActualizacion?.let { ts ->
+                        FilaInfo(
+                            Icons.Default.Settings, "Vinculado el",
+                            SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(ts))
+                        )
+                    }
+                } else {
+                    Row(
+                        verticalAlignment     = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.size(8.dp).background(CRojo, CircleShape))
+                        Text("Sin cuenta vinculada", fontSize = 14.sp, color = CSecund)
+                    }
+                }
+            }
+        }
+
+        // ── Acciones ──────────────────────────────────────────────────────────
+        Column(
+            modifier            = Modifier.width(300.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Spacer(Modifier.height(52.dp))
+
+            if (config?.vinculado == true) {
+                if (!confirmar) {
+                    BotonConfig(
+                        icono   = Icons.Default.LinkOff,
+                        texto   = "Desvincular pantalla",
+                        colorBg = CRojo.copy(alpha = 0.15f),
+                        colorTx = CRojo,
+                        onClick = { confirmar = true }
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(CCard, RoundedCornerShape(14.dp))
+                            .padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text("¿Desvincular esta pantalla?", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = CTexto)
+                        Text("Deberás vincularla nuevamente con tu teléfono.", fontSize = 13.sp, color = CSecund)
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            BotonConfig(
+                                icono    = Icons.Default.LinkOff,
+                                texto    = "Confirmar",
+                                colorBg  = CRojo.copy(alpha = 0.2f),
+                                colorTx  = CRojo,
+                                modifier = Modifier.weight(1f),
+                                onClick  = { vm.desvincular(onDesvincular) }
+                            )
+                            BotonConfig(
+                                icono    = Icons.Default.Settings,
+                                texto    = "Cancelar",
+                                colorBg  = CCard,
+                                colorTx  = CTexto,
+                                modifier = Modifier.weight(1f),
+                                onClick  = { confirmar = false }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SeccionInfo(titulo: String, contenido: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CCard, RoundedCornerShape(14.dp))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(titulo.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = CAzul, letterSpacing = 1.sp)
+        contenido()
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FilaInfo(icono: ImageVector, etiqueta: String, valor: String) {
+    Row(
+        modifier              = Modifier.fillMaxWidth(),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(icono, null, tint = CSecund, modifier = Modifier.size(16.dp))
+        Text(etiqueta, fontSize = 13.sp, color = CSecund, modifier = Modifier.width(100.dp))
+        Text(valor, fontSize = 13.sp, color = CTexto, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun BotonConfig(
+    icono:    ImageVector,
+    texto:    String,
+    colorBg:  Color,
+    colorTx:  Color,
+    modifier: Modifier = Modifier,
+    onClick:  () -> Unit
+) {
+    var tieneFoco by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                if (tieneFoco) CAzulF.copy(alpha = 0.3f) else colorBg,
+                RoundedCornerShape(10.dp)
+            )
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(icono, null, tint = colorTx, modifier = Modifier.size(18.dp))
+        Text(texto, fontSize = 13.sp, color = colorTx, fontWeight = FontWeight.SemiBold)
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvDashboardScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.annotation.SuppressLint
+import android.app.Application
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LocationOff
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.People
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.data.entitys.FamiliarTvEntity
+import com.mapbox.common.MapboxOptions
+import com.mapbox.geojson.Point
+import com.mapbox.maps.CameraOptions           // ← import explícito
+import com.mapbox.maps.MapboxExperimental
+import com.mapbox.maps.MapboxMap
+import com.mapbox.maps.Style
+import com.mapbox.maps.plugin.annotation.AnnotationType
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import com.mapbox.maps.extension.compose.MapboxMap
+import com.mapbox.maps.extension.compose.style.MapStyle
+import com.mapbox.maps.extension.compose.animation.viewport.rememberMapViewportState
+import com.mapbox.maps.extension.compose.annotation.generated.PointAnnotation
+
+private val DPanel    = Color(0xFF0F1629)
+private val DTexto    = Color(0xFFE0E0E0)
+private val DSecund   = Color(0xFF9E9E9E)
+private val DAzul     = Color(0xFF1565C0)
+private val DAzulFoco = Color(0xFF1976D2)
+private val DVerde    = Color(0xFF4CAF50)
+private val DGris     = Color(0xFF424242)
+
+// ── ViewModel ─────────────────────────────────────────────────────────────────
+
+class TvDashboardViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val db    = AppDatabaseTv.getInstance(app)
+    val familiares    = db.familiarTvDao().observarTodos()
+
+    private val _seleccionado = MutableStateFlow<FamiliarTvEntity?>(null)
+    val seleccionado: StateFlow<FamiliarTvEntity?> = _seleccionado.asStateFlow()
+
+    fun seleccionar(familiar: FamiliarTvEntity) {
+        _seleccionado.value =
+            if (_seleccionado.value?.usuarioId == familiar.usuarioId) null else familiar
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            TvDashboardViewModel(app) as T
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+@SuppressLint("RememberReturnType")
+@OptIn(ExperimentalTvMaterial3Api::class, MapboxExperimental::class)
+@Composable
+fun TvDashboardScreen() {
+    val context = LocalContext.current
+    val vm: TvDashboardViewModel = viewModel(
+        factory = TvDashboardViewModel.Factory(context.applicationContext as Application)
+    )
+    val familiares   by vm.familiares.collectAsState(initial = emptyList())
+    val seleccionado by vm.seleccionado.collectAsState()
+
+    // ✅ Fix 1: token directo, evita el warning de LocalContext + getString
+    remember {
+        MapboxOptions.accessToken =
+            "pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ"
+    }
+
+    // ✅ Fix 2: CameraOptions.Builder en lugar del DSL — evita conflicto con Expression.zoom()
+    val mapViewportState = rememberMapViewportState {
+        setCameraOptions(
+            CameraOptions.Builder()
+                .center(Point.fromLngLat(-100.0, 22.0))
+                .zoom(4.5)
+                .build()
+        )
+    }
+
+    // Mueve la cámara cuando el usuario selecciona un familiar
+    LaunchedEffect(seleccionado) {
+        val lat = seleccionado?.latitud  ?: return@LaunchedEffect
+        val lng = seleccionado?.longitud ?: return@LaunchedEffect
+        mapViewportState.setCameraOptions(
+            CameraOptions.Builder()
+                .center(Point.fromLngLat(lng, lat))
+                .zoom(14.0)
+                .build()
+        )
+    }
+
+    Row(modifier = Modifier.fillMaxSize()) {
+
+        // ── Lista de familiares ───────────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .width(260.dp)
+                .fillMaxHeight()
+                .background(DPanel)
+                .padding(vertical = 12.dp, horizontal = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier              = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+            ) {
+                Icon(Icons.Default.People, null, tint = DAzul, modifier = Modifier.size(20.dp))
+                Text("Familiares", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = DTexto)
+                Spacer(Modifier.weight(1f))
+                Text("${familiares.size}", fontSize = 13.sp, color = DAzul, fontWeight = FontWeight.Bold)
+            }
+
+            if (familiares.isEmpty()) {
+                Box(
+                    modifier         = Modifier.fillMaxWidth().padding(20.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Sin familiares registrados",
+                        fontSize  = 13.sp,
+                        color     = DSecund,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(items = familiares, key = { it.usuarioId }) { familiar ->
+                        FamiliarMapCard(
+                            familiar     = familiar,
+                            seleccionado = familiar.usuarioId == seleccionado?.usuarioId,
+                            onClick      = { vm.seleccionar(familiar) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Separador ─────────────────────────────────────────────────────────
+        Box(
+            modifier = Modifier.width(1.dp).fillMaxHeight()
+                .background(Color.White.copy(alpha = 0.06f))
+        )
+
+        // ── Mapa ──────────────────────────────────────────────────────────────
+        Box(modifier = Modifier.fillMaxSize()) {
+
+            // ✅ Fix 3: MapboxMap, MapStyle y PointAnnotation con imports explícitos
+            MapboxMap(
+                modifier = Modifier.fillMaxSize(),
+                mapViewportState = mapViewportState,
+                scaleBar = {},
+                style = { MapStyle(style = Style.DARK) }
+            ) {
+                familiares.forEach { familiar ->
+                    val lat = familiar.latitud ?: return@forEach
+                    val lng = familiar.longitud ?: return@forEach
+                    PointAnnotation(point = Point.fromLngLat(lng, lat))
+                }
+            }
+
+            // Overlay: info del familiar seleccionado
+            seleccionado?.let { f ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(20.dp)
+                        .background(DPanel.copy(alpha = 0.95f), RoundedCornerShape(12.dp))
+                        .border(1.dp, DAzul.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 20.dp, vertical = 14.dp)
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            "${f.nombre} ${f.apellido ?: ""}".trim(),
+                            fontSize   = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color      = DTexto
+                        )
+                        Row(
+                            verticalAlignment     = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier.size(7.dp).background(
+                                    if (f.enLinea) DVerde else DGris, CircleShape
+                                )
+                            )
+                            Text(
+                                if (f.enLinea) "En línea" else "Sin conexión",
+                                fontSize = 12.sp,
+                                color    = if (f.enLinea) DVerde else DGris
+                            )
+                        }
+                        f.latitud?.let { lat ->
+                            f.longitud?.let { lng ->
+                                Text("%.5f, %.5f".format(lat, lng), fontSize = 11.sp, color = DSecund)
+                            }
+                        }
+                        f.ultimaUbicacionFecha?.let {
+                            Text("Últ. act: ${it.take(16)}", fontSize = 11.sp, color = DSecund.copy(alpha = 0.7f))
+                        }
+                    }
+                }
+            }
+
+            // Hint cuando no hay selección pero sí hay ubicaciones
+            if (seleccionado == null && familiares.any { it.latitud != null }) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 20.dp)
+                        .background(DPanel.copy(alpha = 0.85f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 20.dp, vertical = 8.dp)
+                ) {
+                    Text("Selecciona un familiar para centrar el mapa", fontSize = 13.sp, color = DSecund)
+                }
+            }
+        }
+    }
+}
+
+// ── Tarjeta de familiar ───────────────────────────────────────────────────────
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FamiliarMapCard(
+    familiar:     FamiliarTvEntity,
+    seleccionado: Boolean,
+    onClick:      () -> Unit
+) {
+    var tieneFoco by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                when {
+                    seleccionado -> DAzul
+                    tieneFoco    -> DAzulFoco.copy(alpha = 0.35f)
+                    else         -> Color.Transparent
+                }
+            )
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(36.dp).background(
+                if (seleccionado) Color.White.copy(alpha = 0.25f) else DAzul.copy(alpha = 0.3f),
+                CircleShape
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                familiar.nombre.firstOrNull()?.uppercase() ?: "?",
+                fontSize   = 16.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color      = Color.White
+            )
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "${familiar.nombre} ${familiar.apellido ?: ""}".trim(),
+                fontSize   = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color      = if (seleccionado) Color.White else DTexto,
+                maxLines   = 1
+            )
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier.size(5.dp).background(
+                        if (familiar.enLinea) DVerde else DGris, CircleShape
+                    )
+                )
+                Text(
+                    if (familiar.enLinea) "En línea" else "Sin conexión",
+                    fontSize = 10.sp,
+                    color    = if (seleccionado) Color.White.copy(alpha = 0.8f) else DSecund
+                )
+            }
+        }
+
+        Icon(
+            imageVector = if (familiar.latitud != null)
+                Icons.Default.LocationOn else Icons.Default.LocationOff,
+            contentDescription = null,
+            tint     = if (familiar.latitud != null) DVerde else DGris,
+            modifier = Modifier.size(15.dp)
+        )
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvFamiliaScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.app.Application
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FamilyRestroom
+import androidx.compose.material.icons.filled.LocationOff
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.data.entitys.FamiliarTvEntity
+
+private val FCard    = Color(0xFF0F1629)
+private val FTexto   = Color(0xFFE0E0E0)
+private val FSecund  = Color(0xFF9E9E9E)
+private val FAzul    = Color(0xFF1565C0)
+private val FVerde   = Color(0xFF4CAF50)
+private val FGris    = Color(0xFF424242)
+
+// ── ViewModel ─────────────────────────────────────────────────────────────────
+
+class TvFamiliaViewModel(app: Application) : AndroidViewModel(app) {
+    private val db = AppDatabaseTv.getInstance(app)
+    val familiares = db.familiarTvDao().observarTodos()
+    val config     = db.configTvDao().observar()
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            TvFamiliaViewModel(app) as T
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvFamiliaScreen() {
+    val context = LocalContext.current
+    val vm: TvFamiliaViewModel = viewModel(
+        factory = TvFamiliaViewModel.Factory(context.applicationContext as Application)
+    )
+    val familiares by vm.familiares.collectAsState(initial = emptyList())
+    val config     by vm.config.collectAsState(initial = null)
+
+    Column(
+        modifier            = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        // Cabecera
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(Icons.Default.FamilyRestroom, null, tint = FAzul, modifier = Modifier.size(30.dp))
+            Column {
+                Text("Mi Familia", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = FTexto)
+                config?.nombreUsuario?.let {
+                    Text("Cuenta de: $it", fontSize = 13.sp, color = FSecund)
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .background(FAzul.copy(alpha = 0.2f), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "${familiares.size} integrante${if (familiares.size != 1) "s" else ""}",
+                    fontSize   = 13.sp,
+                    color      = FAzul,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        if (familiares.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(Icons.Default.Person, null, tint = FSecund, modifier = Modifier.size(64.dp))
+                    Text("Sin integrantes registrados", fontSize = 20.sp, color = FTexto, fontWeight = FontWeight.SemiBold)
+                    Text("Los integrantes aparecerán aquí cuando el teléfono envíe datos", fontSize = 14.sp, color = FSecund)
+                }
+            }
+        } else {
+            LazyVerticalGrid(
+                columns               = GridCells.Fixed(3),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement   = Arrangement.spacedBy(16.dp)
+            ) {
+                items(items = familiares, key = { it.usuarioId }) { familiar ->
+                    FamiliarCard(familiar)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun FamiliarCard(familiar: FamiliarTvEntity) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(FCard)
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // Avatar
+        Box(
+            modifier = Modifier.size(70.dp).background(FAzul.copy(alpha = 0.3f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                familiar.nombre.firstOrNull()?.uppercase() ?: "?",
+                fontSize   = 30.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color      = Color.White
+            )
+        }
+
+        Text(
+            "${familiar.nombre} ${familiar.apellido ?: ""}".trim(),
+            fontSize   = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color      = FTexto,
+            maxLines   = 1
+        )
+
+        // Estado conexión
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(modifier = Modifier.size(8.dp).background(
+                if (familiar.enLinea) FVerde else FGris, CircleShape
+            ))
+            Text(
+                if (familiar.enLinea) "En línea" else "Sin conexión",
+                fontSize = 12.sp,
+                color    = if (familiar.enLinea) FVerde else FGris
+            )
+        }
+
+        // Ubicación
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = if (familiar.latitud != null) Icons.Default.LocationOn else Icons.Default.LocationOff,
+                contentDescription = null,
+                tint     = if (familiar.latitud != null) FVerde else FGris,
+                modifier = Modifier.size(15.dp)
+            )
+            Text(
+                if (familiar.latitud != null)
+                    "%.4f, %.4f".format(familiar.latitud, familiar.longitud)
+                else
+                    "Sin ubicación",
+                fontSize = 11.sp,
+                color    = FSecund
+            )
+        }
+
+        familiar.ultimaUbicacionFecha?.let {
+            Text(
+                "Act: ${it.take(16)}",
+                fontSize = 10.sp,
+                color    = FSecund.copy(alpha = 0.6f)
+            )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvMainScreen.kt">
+package com.example.compasos_tv.Screan
+
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.navigation.NavController
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Text
+import com.example.compasos_tv.Navigation.TvScreen
+
+data class TvNavItem(val pantalla: TvScreen, val icono: ImageVector)
+
+private val itemsNav = listOf(
+    TvNavItem(TvScreen.Dashboard,        Icons.Filled.Home),
+    TvNavItem(TvScreen.AlertasRecibidas, Icons.Filled.Notifications),
+    TvNavItem(TvScreen.FamiliaEnLinea,   Icons.Filled.Face),
+    TvNavItem(TvScreen.Configuracion,    Icons.Filled.Settings)
+)
+
+private val ColorFondo        = Color(0xFF0A0E1A)
+private val ColorBarra        = Color(0xFF0F1629)
+private val ColorSeleccionado = Color(0xFF1565C0)
+private val ColorFocused      = Color(0xFF1976D2)
+private val ColorTexto        = Color(0xFFE0E0E0)
+private val ColorTextoSecund  = Color(0xFF9E9E9E)
+private val ColorRojo         = Color(0xFFE53935)
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvMainScreen(
+    navController:    NavController,
+    rutaSeleccionada: String,
+    padContent:       Boolean = true,          // ← nuevo parámetro
+    contenido:        @Composable () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ColorFondo)
+    ) {
+        // ── Barra lateral ─────────────────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .width(220.dp)
+                .fillMaxHeight()
+                .background(ColorBarra)
+                .padding(vertical = 24.dp, horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier          = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint               = ColorRojo,
+                    modifier           = Modifier.size(28.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text       = "CompaSOS",
+                    color      = ColorTexto,
+                    fontSize   = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            itemsNav.forEach { item ->
+                TvNavItemRow(
+                    item         = item,
+                    seleccionado = rutaSeleccionada == item.pantalla.route,
+                    onClick      = {
+                        if (rutaSeleccionada != item.pantalla.route) {
+                            navController.navigate(item.pantalla.route) {
+                                popUpTo(TvScreen.Dashboard.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState    = true
+                            }
+                        }
+                    }
+                )
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            Text(
+                text     = "TV v1.0",
+                color    = ColorTextoSecund,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(Color.White.copy(alpha = 0.06f))
+        )
+
+        // ── Área de contenido (con o sin padding según pantalla) ──────────────
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (padContent) Modifier.padding(32.dp) else Modifier)
+        ) {
+            contenido()
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvNavItemRow(
+    item:         TvNavItem,
+    seleccionado: Boolean,
+    onClick:      () -> Unit
+) {
+    var tieneFoco by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+
+    val colorFondo by animateColorAsState(
+        targetValue = when {
+            seleccionado -> ColorSeleccionado
+            tieneFoco    -> ColorFocused.copy(alpha = 0.4f)
+            else         -> Color.Transparent
+        },
+        animationSpec = tween(150),
+        label         = "nav_color"
+    )
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colorFondo)
+            .focusRequester(focusRequester)
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+            .padding(horizontal = 12.dp, vertical = 14.dp)
+    ) {
+        Icon(
+            imageVector        = item.icono,
+            contentDescription = null,
+            tint               = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
+            modifier           = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text       = item.pantalla.titulo,
+            color      = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
+            fontSize   = 14.sp,
+            fontWeight = if (seleccionado) FontWeight.SemiBold else FontWeight.Normal
+        )
+        if (seleccionado) {
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.White)
+            )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/VinculacionScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.app.Application
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.services.TvMqttService
+import com.example.compasos_tv.services.VinculacionTvRepository
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+// ── Colores ───────────────────────────────────────────────────────────────────
+
+private val VFondo      = Color(0xFF0A0E1A)
+private val VPanel      = Color(0xFF0F1629)
+private val VTexto      = Color(0xFFE0E0E0)
+private val VSecund     = Color(0xFF9E9E9E)
+private val VAzul       = Color(0xFF1565C0)
+private val VRojo       = Color(0xFFE53935)
+
+// ── Estado ────────────────────────────────────────────────────────────────────
+
+sealed class EstadoVinculacion {
+    object Iniciando                          : EstadoVinculacion()
+    object Esperando                          : EstadoVinculacion()
+    data class Error(val mensaje: String)     : EstadoVinculacion()
+}
+
+// ── ViewModel ─────────────────────────────────────────────────────────────────
+
+class VinculacionTvViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val repo = VinculacionTvRepository(app)
+    val config       = repo.observarConfig()
+
+    private val _codigo = MutableStateFlow("")
+    val codigo: StateFlow<String> = _codigo.asStateFlow()
+
+    private val _estado = MutableStateFlow<EstadoVinculacion>(EstadoVinculacion.Iniciando)
+    val estado: StateFlow<EstadoVinculacion> = _estado.asStateFlow()
+
+    fun generarCodigo() {
+        viewModelScope.launch {
+            _estado.value = EstadoVinculacion.Iniciando
+            try {
+                _codigo.value = repo.iniciarVinculacion()
+                _estado.value = EstadoVinculacion.Esperando
+            } catch (e: Exception) {
+                _estado.value = EstadoVinculacion.Error(e.message ?: "Sin conexión al broker MQTT")
+            }
+        }
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            VinculacionTvViewModel(app) as T
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun VinculacionScreen(onVinculado: () -> Unit) {
+    val context = LocalContext.current
+    val vm: VinculacionTvViewModel = viewModel(
+        factory = VinculacionTvViewModel.Factory(context.applicationContext as Application)
+    )
+    val config by vm.config.collectAsState(initial = null)
+    val codigo by vm.codigo.collectAsState()
+    val estado by vm.estado.collectAsState()
+    val tvId   = remember {
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }
+
+    // Si ya estaba vinculado → navegar inmediatamente
+    LaunchedEffect(Unit) {
+        val cfg = AppDatabaseTv.getInstance(context).configTvDao().obtener()
+        if (cfg?.vinculado == true) { onVinculado(); return@LaunchedEffect }
+        vm.generarCodigo()
+    }
+
+    // Cuando el teléfono confirma la vinculación → navegar
+    LaunchedEffect(config) {
+        if (config?.vinculado == true) onVinculado()
+    }
+
+    Box(
+        modifier         = Modifier.fillMaxSize().background(VFondo),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier              = Modifier.fillMaxSize().padding(60.dp),
+            horizontalArrangement = Arrangement.spacedBy(48.dp),
+            verticalAlignment     = Alignment.CenterVertically
+        ) {
+            // ── Instrucciones ──────────────────────────────────────────────────
+            Column(
+                modifier            = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
+                Row(
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Tv, null,
+                        tint     = VRojo,
+                        modifier = Modifier.size(42.dp)
+                    )
+                    Text(
+                        "CompaSOS TV",
+                        fontSize   = 34.sp,
+                        fontWeight = FontWeight.Bold,
+                        color      = VTexto
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "Para vincular esta pantalla:",
+                    fontSize   = 18.sp,
+                    color      = VTexto,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                PasoVinculacion("1", "Abre la app CompaSOS en tu teléfono")
+                PasoVinculacion("2", "Ve a Dispositivos → Vincular pantalla TV")
+                PasoVinculacion("3", "Ingresa el código que aparece a la derecha")
+
+                Spacer(Modifier.height(16.dp))
+
+                Row(
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Wifi, null, tint = VSecund, modifier = Modifier.size(16.dp))
+                    Text("Modelo: ${Build.MODEL}  ·  ID: tv_$tvId", fontSize = 12.sp, color = VSecund)
+                }
+            }
+
+            // ── Panel del código ───────────────────────────────────────────────
+            Box(
+                modifier = Modifier
+                    .width(420.dp)
+                    .background(VPanel, RoundedCornerShape(24.dp))
+                    .border(2.dp, VAzul.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
+                    .padding(horizontal = 44.dp, vertical = 48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
+                    Text("Código de vinculación", fontSize = 15.sp, color = VSecund)
+
+                    when (val e = estado) {
+                        is EstadoVinculacion.Iniciando -> {
+                            CircularProgressIndicator(color = VAzul, modifier = Modifier.size(52.dp))
+                            Text("Conectando...", fontSize = 14.sp, color = VSecund)
+                        }
+
+                        is EstadoVinculacion.Esperando -> {
+                            // Código grande legible desde el sillón
+                            Text(
+                                text          = codigo.chunked(3).joinToString("  "),
+                                fontSize      = 72.sp,
+                                fontWeight    = FontWeight.ExtraBold,
+                                fontFamily    = FontFamily.Monospace,
+                                color         = Color.White,
+                                letterSpacing = 3.sp
+                            )
+
+                            PuntosAnimados()
+
+                            Text(
+                                "Esperando confirmación del teléfono...",
+                                fontSize  = 13.sp,
+                                color     = VSecund,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+
+                        is EstadoVinculacion.Error -> {
+                            Text("Sin conexión", fontSize = 16.sp, color = VRojo)
+                            Text(e.mensaje, fontSize = 12.sp, color = VSecund, textAlign = TextAlign.Center)
+                            TextButton(onClick = { vm.generarCodigo() }) {
+                                Text("Reintentar", color = VAzul, fontSize = 16.sp)
+                            }
+                        }
+                    }
+
+                    Text(
+                        "Válido por 5 minutos",
+                        fontSize = 11.sp,
+                        color    = VSecund.copy(alpha = 0.5f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun PasoVinculacion(numero: String, texto: String) {
+    Row(
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Box(
+            modifier         = Modifier.size(32.dp).background(VAzul, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(numero, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+        Text(texto, fontSize = 15.sp, color = Color(0xFF9E9E9E))
+    }
+}
+
+@Composable
+private fun PuntosAnimados() {
+    var puntos by remember { mutableStateOf(1) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(600)
+            puntos = if (puntos >= 3) 1 else puntos + 1
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        repeat(3) { i ->
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(if (i < puntos) VAzul else VAzul.copy(alpha = 0.25f))
+            )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/services/TvMqttService.kt">
+package com.example.compasos_tv.services
+
+import android.app.*
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.IBinder
+import android.provider.Settings
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.example.compasos_tv.config.MqttConfig
+import com.example.compasos_tv.config.MqttManager
+import com.example.compasos_tv.data.entitys.AlertaTvEntity
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.data.entitys.FamiliarTvEntity
+import kotlinx.coroutines.*
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.*
+
+class TvMqttService : Service() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mqtt  = MqttManager()
+    private lateinit var db: AppDatabaseTv
+    private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+
+    companion object {
+        private const val CANAL    = "compasos_tv_svc"
+        private const val NOTIF_ID = 8001
+
+        fun iniciar(context: Context) {
+            val intent = Intent(context, TvMqttService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                context.startForegroundService(intent)
+            else
+                context.startService(intent)
+        }
+
+        /** ID único de esta TV basado en Android ID */
+        fun obtenerTvId(context: Context): String {
+            val androidId = Settings.Secure.getString(
+                context.contentResolver, Settings.Secure.ANDROID_ID
+            )
+            return "tv_$androidId"
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        db = AppDatabaseTv.getInstance(applicationContext)
+        crearCanal()
+        startForeground(NOTIF_ID, notif())
+        conectarYSuscribir()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        scope.cancel()
+        mqtt.desconectar()
+        super.onDestroy()
+    }
+
+    // ── MQTT ──────────────────────────────────────────────────────────────────
+
+    private fun conectarYSuscribir() {
+        scope.launch {
+            try {
+                mqtt.conectar()
+                val tvId = obtenerTvId(applicationContext)
+
+                // Sesión + perfil del usuario vinculado
+                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/sesion") { _, payload ->
+                    scope.launch { procesarSesion(payload) }
+                }
+
+                // Alerta recibida desde el teléfono
+                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/alerta") { _, payload ->
+                    scope.launch { procesarAlerta(payload) }
+                }
+
+                // Ubicación en vivo de familiares
+                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/ubicacion") { _, payload ->
+                    scope.launch { procesarUbicacion(payload) }
+                }
+
+                // Respuesta de vinculación del teléfono
+                mqtt.suscribir(
+                    "${MqttConfig.TOPIC_VINCULACION}/tv/$tvId/respuesta"
+                ) { _, payload ->
+                    scope.launch { procesarRespuestaVinculacion(payload) }
+                }
+
+                Log.d("TvMqttSvc", "✅ Suscrito a topics de TV: $tvId")
+
+            } catch (e: Exception) {
+                Log.e("TvMqttSvc", "Error MQTT: ${e.message}")
+            }
+        }
+    }
+
+    // ── Procesadores ──────────────────────────────────────────────────────────
+
+    /** Sesión: usuario + lista de familiares que manda el teléfono */
+    private suspend fun procesarSesion(payloadJson: String) {
+        try {
+            val json      = JSONObject(payloadJson)
+            val usuarioId = json.optString("usuarioId")
+            val nombre    = json.optString("nombre")
+            val email     = json.optString("email")
+
+            // Actualizar config con datos del usuario vinculado
+            val config = db.configTvDao().obtener()
+            if (config != null && config.vinculado) {
+                db.configTvDao().guardar(
+                    config.copy(
+                        nombreUsuario       = nombre,
+                        emailUsuario        = email,
+                        ultimaActualizacion = System.currentTimeMillis()
+                    )
+                )
+            }
+
+            // Actualizar familiares
+            val familiaresArray = json.optJSONArray("familiares") ?: return
+            for (i in 0 until familiaresArray.length()) {
+                val f = familiaresArray.getJSONObject(i)
+                db.familiarTvDao().insertar(
+                    FamiliarTvEntity(
+                        usuarioId = f.optString("usuarioId"),
+                        nombre = f.optString("nombre"),
+                        apellido = f.optString("apellido"),
+                        latitud = f.optDouble("latitud").takeIf { !it.isNaN() },
+                        longitud = f.optDouble("longitud").takeIf { !it.isNaN() },
+                        ultimaUbicacionFecha = f.optString("fecha"),
+                        enLinea = f.optBoolean("enLinea", true)
+                    )
+                )
+            }
+            Log.d("TvMqttSvc", "Sesión actualizada: $nombre | ${familiaresArray.length()} familiar(es)")
+        } catch (e: Exception) {
+            Log.e("TvMqttSvc", "Error procesando sesión: ${e.message}")
+        }
+    }
+
+    /** Ubicación en vivo de un familiar específico */
+    private suspend fun procesarUbicacion(payloadJson: String) {
+        try {
+            val json = JSONObject(payloadJson)
+            val id   = json.optString("usuarioId")
+            val lat  = json.optDouble("latitud")
+            val lng  = json.optDouble("longitud")
+            if (lat.isNaN() || lng.isNaN()) return
+
+            db.familiarTvDao().actualizarUbicacion(
+                id    = id,
+                lat   = lat,
+                lng   = lng,
+                fecha = json.optString("fecha", fmt.format(Date()))
+            )
+        } catch (e: Exception) {
+            Log.e("TvMqttSvc", "Error procesando ubicación: ${e.message}")
+        }
+    }
+
+    /** Alerta de emergencia enviada desde el teléfono */
+    private suspend fun procesarAlerta(payloadJson: String) {
+        try {
+            val json = JSONObject(payloadJson)
+            db.alertaTvDao().insertar(
+                AlertaTvEntity(
+                    id = json.optString("alertaId", UUID.randomUUID().toString()),
+                    tipo = json.optString("tipoAlerta"),
+                    descripcion = json.optString("descripcion"),
+                    emisorNombre = json.optString("emisorNombre"),
+                    emisorId = json.optString("emisorId"),
+                    latitud = json.optDouble("latitud").takeIf { !it.isNaN() },
+                    longitud = json.optDouble("longitud").takeIf { !it.isNaN() },
+                    fecha = json.optString("fecha", fmt.format(Date())),
+                    leida = false
+                )
+            )
+            Log.d("TvMqttSvc", "Alerta recibida y guardada")
+        } catch (e: Exception) {
+            Log.e("TvMqttSvc", "Error procesando alerta: ${e.message}")
+        }
+    }
+
+    /** El teléfono confirma la vinculación con los datos del usuario */
+    private suspend fun procesarRespuestaVinculacion(payloadJson: String) {
+        try {
+            val json      = JSONObject(payloadJson)
+            val usuarioId = json.optString("usuarioId")
+            val nombre    = json.optString("nombre")
+            val email     = json.optString("email")
+
+            db.configTvDao().confirmarVinculacion(
+                usuarioId = usuarioId,
+                nombre    = nombre,
+                email     = email,
+                ts        = System.currentTimeMillis()
+            )
+            Log.d("TvMqttSvc", "✅ TV vinculada con usuario: $nombre")
+        } catch (e: Exception) {
+            Log.e("TvMqttSvc", "Error procesando vinculación: ${e.message}")
+        }
+    }
+
+    // ── Notificación persistente ───────────────────────────────────────────────
+
+    private fun notif() = NotificationCompat.Builder(this, CANAL)
+        .setSmallIcon(android.R.drawable.ic_menu_compass)
+        .setContentTitle("CompaSOS TV")
+        .setContentText("Conectado — recibiendo datos del teléfono")
+        .setPriority(NotificationCompat.PRIORITY_LOW)
+        .build()
+
+    private fun crearCanal() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .createNotificationChannel(
+                    NotificationChannel(CANAL, "Servicio TV", NotificationManager.IMPORTANCE_LOW)
+                )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/services/VinculacionTvRepository.kt">
+package com.example.compasos_tv.services
+
+import android.content.Context
+import android.util.Log
+import com.example.compasos_tv.config.MqttConfig
+import com.example.compasos_tv.config.MqttManager
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.data.entitys.ConfigTvEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
+
+class VinculacionTvRepository(private val context: Context) {
+
+    private val db  = AppDatabaseTv.getInstance(context)
+    private val dao = db.configTvDao()
+    private val mqtt = MqttManager()
+
+    fun observarConfig(): Flow<ConfigTvEntity?> = dao.observar()
+
+    /**
+     * Genera un código de 6 caracteres, lo muestra en pantalla
+     * y publica la solicitud de vinculación para que el teléfono la reciba.
+     */
+    suspend fun iniciarVinculacion(): String = withContext(Dispatchers.IO) {
+        val tvId  = TvMqttService.obtenerTvId(context)
+        val codigo = (100000..999999).random().toString()
+
+        // Asegurar que existe la fila singleton
+        if (dao.obtener() == null) {
+            dao.guardar(ConfigTvEntity(tvDeviceId = tvId))
+        }
+        dao.setCodigo(codigo)
+
+        // Publicar solicitud → el teléfono la recibirá en su AlertaMqttService
+        if (!mqtt.estaConectado) mqtt.conectar()
+        val payload = org.json.JSONObject().apply {
+            put("tvId",   tvId)
+            put("codigo", codigo)
+            put("modelo", android.os.Build.MODEL)
+        }.toString()
+        mqtt.publicar("${MqttConfig.TOPIC_VINCULACION}/tv/$tvId/solicitud", payload)
+        Log.d("VinculacionTv", "Solicitud publicada con código: $codigo")
+
+        codigo
+    }
+
+    suspend fun desvincular() = withContext(Dispatchers.IO) {
+        dao.desvincular()
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/ui/theme/Color.kt">
+package com.example.compasos_tv.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+val Purple80 = Color(0xFFD0BCFF)
+val PurpleGrey80 = Color(0xFFCCC2DC)
+val Pink80 = Color(0xFFEFB8C8)
+
+val Purple40 = Color(0xFF6650a4)
+val PurpleGrey40 = Color(0xFF625b71)
+val Pink40 = Color(0xFF7D5260)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/ui/theme/Theme.kt">
+package com.example.compasos_tv.ui.theme
+
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.Composable
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.darkColorScheme
+import androidx.tv.material3.lightColorScheme
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun CompaSOS_TVTheme(
+    isInDarkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit,
+) {
+    val colorScheme = if (isInDarkTheme) {
+        darkColorScheme(
+            primary = Purple80,
+            secondary = PurpleGrey80,
+            tertiary = Pink80
+        )
+    } else {
+        lightColorScheme(
+            primary = Purple40,
+            secondary = PurpleGrey40,
+            tertiary = Pink40
+        )
+    }
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/ui/theme/Type.kt">
+package com.example.compasos_tv.ui.theme
+
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Typography
+
+// Set of Material typography styles to start with
+@OptIn(ExperimentalTvMaterial3Api::class)
+val Typography = Typography(
+    bodyLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.5.sp
+    )
+    /* Other default text styles to override
+    titleLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = 0.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.5.sp
+    )
+    */
+)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/MainActivity.kt">
+package com.example.compasos_tv
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import com.example.compasos_tv.Navigation.TvNavigation
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            TvNavigation()
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/keepRules/rules.keep">
+# Add project specific R8 rules here.
+# AGP will combine all keep rule files in src/main/keepRules to pass to R8
+#
+# For more details, see
+#   https://d.android.com/r/tools/r8/keep-rules
+
+# If your project uses WebView with JS, uncomment the following
+# and specify the fully qualified class name to the JavaScript interface
+# class:
+#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
+#   public *;
+#}
+</file>
+
+<file path="app/src/main/res/values/developer-config.xml">
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mapbox_access_token" translatable="false">pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ</string>
+</resources>
+</file>
+
+<file path="app/src/main/res/values/strings.xml">
+<resources>
+    <string name="app_name">CompaSOS_TV</string>
+</resources>
+</file>
+
+<file path="app/src/main/res/values/themes.xml">
+<resources>
+
+    <style name="Theme.CompaSOS_TV" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>
+</file>
+
+<file path="app/src/main/AndroidManifest.xml">
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:banner="@mipmap/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CompaSOS_TV">
+
+        <service
+            android:name=".services.TvMqttService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>
+</file>
+
+<file path="app/.gitignore">
+/build
+</file>
+
+<file path="app/build.gradle.kts">
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+    id("com.google.devtools.ksp")
+
+
+}
+
+android {
+    namespace = "com.example.compasos_tv"
+    compileSdk {
+        version = release(37)
+    }
+
+    defaultConfig {
+        applicationId = "com.example.compasos_tv"
+        minSdk = 36
+        targetSdk = 37
+        versionCode = 1
+        versionName = "1.0"
+
+    }
+
+    buildTypes {
+        release {
+            optimization {
+                enable = false
+            }
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        compose = true
+    }
+}
+
+dependencies {
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+
+    implementation("androidx.tv:tv-material:1.0.0")
+    implementation("androidx.tv:tv-foundation:1.0.0")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("androidx.compose.material:material-icons-extended:1.6.7")
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
+
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+
+    implementation("androidx.room:room-runtime:2.7.2")
+    implementation("androidx.room:room-ktx:2.7.2")
+    ksp("androidx.room:room-compiler:2.7.2")
+
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    implementation("org.eclipse.paho:org.eclipse.paho.android.service:1.1.1")
+    implementation("com.mapbox.maps:android:11.8.0")
+    implementation("com.mapbox.extension:maps-compose:11.8.0")
+
+
+
+}
+</file>
+
+<file path="gradle/wrapper/gradle-wrapper.properties">
+#Thu Aug 13 16:24:33 CST 2026
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionSha256Sum=553c78f50dafcd54d65b9a444649057857469edf836431389695608536d6b746
+distributionUrl=https\://services.gradle.org/distributions/gradle-9.5.0-bin.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+</file>
+
+<file path="gradle/gradle-daemon-jvm.properties">
+#This file is generated by updateDaemonJvm
+toolchainUrl.FREE_BSD.AARCH64=https\://api.foojay.io/disco/v3.0/ids/cf726b4a1c84b50457225f9bba6d7650/redirect
+toolchainUrl.FREE_BSD.X86_64=https\://api.foojay.io/disco/v3.0/ids/fa1e318c287360478e3c83a9a3ef1007/redirect
+toolchainUrl.LINUX.AARCH64=https\://api.foojay.io/disco/v3.0/ids/cf726b4a1c84b50457225f9bba6d7650/redirect
+toolchainUrl.LINUX.X86_64=https\://api.foojay.io/disco/v3.0/ids/fa1e318c287360478e3c83a9a3ef1007/redirect
+toolchainUrl.MAC_OS.AARCH64=https\://api.foojay.io/disco/v3.0/ids/c2dd35c9d0aaf0ba6ad0791320f99dfc/redirect
+toolchainUrl.MAC_OS.X86_64=https\://api.foojay.io/disco/v3.0/ids/e5810bd7fd1f8a586644409d395a7e55/redirect
+toolchainUrl.UNIX.AARCH64=https\://api.foojay.io/disco/v3.0/ids/cf726b4a1c84b50457225f9bba6d7650/redirect
+toolchainUrl.UNIX.X86_64=https\://api.foojay.io/disco/v3.0/ids/fa1e318c287360478e3c83a9a3ef1007/redirect
+toolchainUrl.WINDOWS.AARCH64=https\://api.foojay.io/disco/v3.0/ids/7b3c4877c0749019e6805bb61e421497/redirect
+toolchainUrl.WINDOWS.X86_64=https\://api.foojay.io/disco/v3.0/ids/d76df094a9cbbabd3b08251f9e61444a/redirect
+toolchainVersion=25
+</file>
+
+<file path="gradle/libs.versions.toml">
+[versions]
+agp = "9.3.1"
+coreKtx = "1.19.0"
+appcompat = "1.6.1"
+kotlin = "2.2.10"
+composeBom = "2026.02.01"
+tvFoundation = "1.0.0-alpha07"
+tvMaterial = "1.0.0-alpha07"
+lifecycleRuntimeKtx = "2.11.0"
+activityCompose = "1.13.0"
+material3 = "1.4.0"
+
+room3 = "3.0.1"
+sqlite = "2.7.0"
+ksp = "2.2.10-2.0.2"
+uiText = "1.11.4"
+
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-tv-foundation = { group = "androidx.tv", name = "tv-foundation", version.ref = "tvFoundation" }
+androidx-tv-material = { group = "androidx.tv", name = "tv-material", version.ref = "tvMaterial" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
+
+androidx-sqlite-bundled = { module = "androidx.sqlite:sqlite-bundled", version.ref = "sqlite" }
+androidx-room3-runtime = { module = "androidx.room3:room3-runtime", version.ref = "room3" }
+androidx-room3-compiler = { module = "androidx.room3:room3-compiler", version.ref = "room3" }
+androidx-compose-ui-text = { group = "androidx.compose.ui", name = "ui-text", version.ref = "uiText" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+androidx-room3 = { id = "androidx.room3", version.ref = "room3" }
+</file>
+
+<file path=".gitignore">
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+</file>
+
+<file path="build.gradle.kts">
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    id("com.google.devtools.ksp") version "2.3.4" apply false
+
+
+
+}
+</file>
+
+<file path="gradle.properties">
+# Project-wide Gradle settings.
+# IDE (e.g. Android Studio) users:
+# Gradle settings configured through the IDE *will override*
+# any settings specified in this file.
+# For more details on how to configure your build environment visit
+# http://www.gradle.org/docs/current/userguide/build_environment.html
+# Specifies the JVM arguments used for the daemon process.
+# The setting is particularly useful for tweaking memory settings.
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+# When configured, Gradle will run in incubating parallel mode.
+# This option should only be used with decoupled projects. For more details, visit
+# https://developer.android.com/r/tools/gradle-multi-project-decoupled-projects
+# org.gradle.parallel=true
+# When enabled, the Configuration Cache allows Gradle to skip the configuration
+# phase entirely if nothing that affects the build configuration (such as build scripts)
+# has changed. Additionally, Gradle applies performance optimizations to task execution.
+org.gradle.configuration-cache=true
+# Kotlin code style for this project: "official" or "obsolete":
+kotlin.code.style=official
+
+MAPBOX_DOWNLOADS_TOKEN=sk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zczhwZ2FzMDMxMjM0cThjNW1jdHZsNCJ9.aK4WtN-a7Guc24Dyqv5z-A
+</file>
+
+<file path="gradlew">
+#!/bin/sh
+
+#
+# Copyright © 2015 the original authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+##############################################################################
+#
+#   Gradle start up script for POSIX generated by Gradle.
+#
+#   Important for running:
+#
+#   (1) You need a POSIX-compliant shell to run this script. If your /bin/sh is
+#       noncompliant, but you have some other compliant shell such as ksh or
+#       bash, then to run this script, type that shell name before the whole
+#       command line, like:
+#
+#           ksh Gradle
+#
+#       Busybox and similar reduced shells will NOT work, because this script
+#       requires all of these POSIX shell features:
+#         * functions;
+#         * expansions «$var», «${var}», «${var:-default}», «${var+SET}»,
+#           «${var#prefix}», «${var%suffix}», and «$( cmd )»;
+#         * compound commands having a testable exit status, especially «case»;
+#         * various built-in commands including «command», «set», and «ulimit».
+#
+#   Important for patching:
+#
+#   (2) This script targets any POSIX shell, so it avoids extensions provided
+#       by Bash, Ksh, etc; in particular arrays are avoided.
+#
+#       The "traditional" practice of packing multiple parameters into a
+#       space-separated string is a well documented source of bugs and security
+#       problems, so this is (mostly) avoided, by progressively accumulating
+#       options in "$@", and eventually passing that to Java.
+#
+#       Where the inherited environment variables (DEFAULT_JVM_OPTS, JAVA_OPTS,
+#       and GRADLE_OPTS) rely on word-splitting, this is performed explicitly;
+#       see the in-line comments for details.
+#
+#       There are tweaks for specific operating systems such as AIX, CygWin,
+#       Darwin, MinGW, and NonStop.
+#
+#   (3) This script is generated from the Groovy template
+#       https://github.com/gradle/gradle/blob/HEAD/platforms/jvm/plugins-application/src/main/resources/org/gradle/api/internal/plugins/unixStartScript.txt
+#       within the Gradle project.
+#
+#       You can find Gradle at https://github.com/gradle/gradle/.
+#
+##############################################################################
+
+# Attempt to set APP_HOME
+
+# Resolve links: $0 may be a link
+app_path=$0
+
+# Need this for daisy-chained symlinks.
+while
+    APP_HOME=${app_path%"${app_path##*/}"}  # leaves a trailing /; empty if no leading path
+    [ -h "$app_path" ]
+do
+    ls=$( ls -ld "$app_path" )
+    link=${ls#*' -> '}
+    case $link in             #(
+      /*)   app_path=$link ;; #(
+      *)    app_path=$APP_HOME$link ;;
+    esac
+done
+
+# This is normally unused
+# shellcheck disable=SC2034
+APP_BASE_NAME=${0##*/}
+# Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
+APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
+
+# Use the maximum available, or set MAX_FD != -1 to use that value.
+MAX_FD=maximum
+
+warn () {
+    echo "$*"
+} >&2
+
+die () {
+    echo
+    echo "$*"
+    echo
+    exit 1
+} >&2
+
+# OS specific support (must be 'true' or 'false').
+cygwin=false
+msys=false
+darwin=false
+nonstop=false
+case "$( uname )" in                #(
+  CYGWIN* )         cygwin=true  ;; #(
+  Darwin* )         darwin=true  ;; #(
+  MSYS* | MINGW* )  msys=true    ;; #(
+  NONSTOP* )        nonstop=true ;;
+esac
+
+CLASSPATH="\\\"\\\""
+
+
+# Determine the Java command to use to start the JVM.
+if [ -n "$JAVA_HOME" ] ; then
+    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+        # IBM's JDK on AIX uses strange locations for the executables
+        JAVACMD=$JAVA_HOME/jre/sh/java
+    else
+        JAVACMD=$JAVA_HOME/bin/java
+    fi
+    if [ ! -x "$JAVACMD" ] ; then
+        die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+else
+    JAVACMD=java
+    if ! command -v java >/dev/null 2>&1
+    then
+        die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+fi
+
+# Increase the maximum file descriptors if we can.
+if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
+    case $MAX_FD in #(
+      max*)
+        # In POSIX sh, ulimit -H is undefined. That's why the result is checked to see if it worked.
+        # shellcheck disable=SC2039,SC3045
+        MAX_FD=$( ulimit -H -n ) ||
+            warn "Could not query maximum file descriptor limit"
+    esac
+    case $MAX_FD in  #(
+      '' | soft) :;; #(
+      *)
+        # In POSIX sh, ulimit -n is undefined. That's why the result is checked to see if it worked.
+        # shellcheck disable=SC2039,SC3045
+        ulimit -n "$MAX_FD" ||
+            warn "Could not set maximum file descriptor limit to $MAX_FD"
+    esac
+fi
+
+# Collect all arguments for the java command, stacking in reverse order:
+#   * args from the command line
+#   * the main class name
+#   * -classpath
+#   * -D...appname settings
+#   * --module-path (only if needed)
+#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and GRADLE_OPTS environment variables.
+
+# For Cygwin or MSYS, switch paths to Windows format before running java
+if "$cygwin" || "$msys" ; then
+    APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
+    CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
+
+    JAVACMD=$( cygpath --unix "$JAVACMD" )
+
+    # Now convert the arguments - kludge to limit ourselves to /bin/sh
+    for arg do
+        if
+            case $arg in                                #(
+              -*)   false ;;                            # don't mess with options #(
+              /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
+                    [ -e "$t" ] ;;                      #(
+              *)    false ;;
+            esac
+        then
+            arg=$( cygpath --path --ignore --mixed "$arg" )
+        fi
+        # Roll the args list around exactly as many times as the number of
+        # args, so each arg winds up back in the position where it started, but
+        # possibly modified.
+        #
+        # NB: a `for` loop captures its iteration list before it begins, so
+        # changing the positional parameters here affects neither the number of
+        # iterations, nor the values presented in `arg`.
+        shift                   # remove old arg
+        set -- "$@" "$arg"      # push replacement arg
+    done
+fi
+
+
+# Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+
+# Collect all arguments for the java command:
+#   * DEFAULT_JVM_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,
+#     and any embedded shellness will be escaped.
+#   * For example: A user cannot expect ${Hostname} to be expanded, as it is an environment variable and will be
+#     treated as '${Hostname}' itself on the command line.
+
+set -- \
+        "-Dorg.gradle.appname=$APP_BASE_NAME" \
+        -classpath "$CLASSPATH" \
+        -jar "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \
+        "$@"
+
+# Stop when "xargs" is not available.
+if ! command -v xargs >/dev/null 2>&1
+then
+    die "xargs is not available"
+fi
+
+# Use "xargs" to parse quoted args.
+#
+# With -n1 it outputs one arg per line, with the quotes and backslashes removed.
+#
+# In Bash we could simply go:
+#
+#   readarray ARGS < <( xargs -n1 <<<"$var" ) &&
+#   set -- "${ARGS[@]}" "$@"
+#
+# but POSIX shell has neither arrays nor command substitution, so instead we
+# post-process each arg (as a line of input to sed) to backslash-escape any
+# character that might be a shell metacharacter, then use eval to reverse
+# that process (while maintaining the separation between arguments), and wrap
+# the whole thing up as a single "set" statement.
+#
+# This will of course break if any of these variables contains a newline or
+# an unmatched quote.
+#
+
+eval "set -- $(
+        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
+        xargs -n1 |
+        sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
+        tr '\n' ' '
+    )" '"$@"'
+
+exec "$JAVACMD" "$@"
+</file>
+
+<file path="gradlew.bat">
+@rem
+@rem Copyright 2015 the original author or authors.
+@rem
+@rem Licensed under the Apache License, Version 2.0 (the "License");
+@rem you may not use this file except in compliance with the License.
+@rem You may obtain a copy of the License at
+@rem
+@rem      https://www.apache.org/licenses/LICENSE-2.0
+@rem
+@rem Unless required by applicable law or agreed to in writing, software
+@rem distributed under the License is distributed on an "AS IS" BASIS,
+@rem WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@rem See the License for the specific language governing permissions and
+@rem limitations under the License.
+@rem
+@rem SPDX-License-Identifier: Apache-2.0
+@rem
+
+@if "%DEBUG%"=="" @echo off
+@rem ##########################################################################
+@rem
+@rem  Gradle startup script for Windows
+@rem
+@rem ##########################################################################
+
+@rem Set local scope for the variables with windows NT shell
+if "%OS%"=="Windows_NT" setlocal
+
+set DIRNAME=%~dp0
+if "%DIRNAME%"=="" set DIRNAME=.
+@rem This is normally unused
+set APP_BASE_NAME=%~n0
+set APP_HOME=%DIRNAME%
+
+@rem Resolve any "." and ".." in APP_HOME to make it shorter.
+for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
+
+@rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
+
+@rem Find java.exe
+if defined JAVA_HOME goto findJavaFromJavaHome
+
+set JAVA_EXE=java.exe
+%JAVA_EXE% -version >NUL 2>&1
+if %ERRORLEVEL% equ 0 goto execute
+
+echo. 1>&2
+echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH. 1>&2
+echo. 1>&2
+echo Please set the JAVA_HOME variable in your environment to match the 1>&2
+echo location of your Java installation. 1>&2
+
+goto fail
+
+:findJavaFromJavaHome
+set JAVA_HOME=%JAVA_HOME:"=%
+set JAVA_EXE=%JAVA_HOME%/bin/java.exe
+
+if exist "%JAVA_EXE%" goto execute
+
+echo. 1>&2
+echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME% 1>&2
+echo. 1>&2
+echo Please set the JAVA_HOME variable in your environment to match the 1>&2
+echo location of your Java installation. 1>&2
+
+goto fail
+
+:execute
+@rem Setup the command line
+
+set CLASSPATH=
+
+
+@rem Execute Gradle
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" -jar "%APP_HOME%\gradle\wrapper\gradle-wrapper.jar" %*
+
+:end
+@rem End local scope for the variables with windows NT shell
+if %ERRORLEVEL% equ 0 goto mainEnd
+
+:fail
+rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
+rem the _cmd.exe /c_ return code!
+set EXIT_CODE=%ERRORLEVEL%
+if %EXIT_CODE% equ 0 set EXIT_CODE=1
+if not ""=="%GRADLE_EXIT_CONSOLE%" exit %EXIT_CODE%
+exit /b %EXIT_CODE%
+
+:mainEnd
+if "%OS%"=="Windows_NT" endlocal
+
+:omega
+</file>
+
+<file path="settings.gradle.kts">
+pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven {
+            url = uri("https://api.mapbox.com/downloads/v2/releases/maven")
+            credentials {
+                username = "mapbox"
+                password = providers.gradleProperty("MAPBOX_DOWNLOADS_TOKEN")
+                    .orElse("").get()
+            }
+            authentication { create<BasicAuthentication>("basic") }
+        }
+    }
+
+}
+
+rootProject.name = "CompaSOS_TV"
+include(":app")
+</file>
+
+</files>
