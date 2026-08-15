@@ -1,12 +1,12 @@
 package com.example.compasos_tv.Navigation
 
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.example.compasos_tv.Screan.*
-import com.example.compasos_tv.screan.VinculacionScreen
-
 @Composable
 fun TvNavigation() {
     val navController = rememberNavController()
@@ -61,5 +61,12 @@ fun TvNavigation() {
                 )
             }
         }
+
+        composable(TvScreen.Videos.route) {
+            TvMainScreen(navController, TvScreen.Videos.route) {
+                TvVideosScreen()
+            }
+        }
+
     }
-}
+    }

@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="mapbox_access_token" translatable="false">pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ</string>
+    <string name="youtube_api_key" translatable="false">AIzaSyARAam8FzM6vA7KW2Jqw2yKcGjpvU0J4NE</string>
 </resources>
+

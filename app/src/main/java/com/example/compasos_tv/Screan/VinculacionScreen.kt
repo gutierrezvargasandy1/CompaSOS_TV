@@ -1,4 +1,4 @@
-package com.example.compasos_tv.screan
+package com.example.compasos_tv.Screan
 
 import android.app.Application
 import android.os.Build

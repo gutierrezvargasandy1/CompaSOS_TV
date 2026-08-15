@@ -2,7 +2,7 @@ package com.example.compasos_tv.config
 
 
 object MqttConfig {
-    const val BROKER_URL       = "tcp://192.168.1.102:1883"
+    const val BROKER_URL       = "tcp://192.168.1.5:1883"
     const val TIMEOUT_CONEXION = 10
     const val KEEP_ALIVE       = 60
     const val QOS              = 1

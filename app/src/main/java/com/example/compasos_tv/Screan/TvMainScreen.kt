@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,8 +42,10 @@ private val itemsNav = listOf(
     TvNavItem(TvScreen.Dashboard,        Icons.Filled.Home),
     TvNavItem(TvScreen.AlertasRecibidas, Icons.Filled.Notifications),
     TvNavItem(TvScreen.FamiliaEnLinea,   Icons.Filled.Face),
-    TvNavItem(TvScreen.Configuracion,    Icons.Filled.Settings)
-)
+    TvNavItem(TvScreen.Configuracion,    Icons.Filled.Settings),
+    TvNavItem(TvScreen.Videos,           Icons.Filled.VideoLibrary),
+
+    )
 
 private val ColorFondo        = Color(0xFF0A0E1A)
 private val ColorBarra        = Color(0xFF0F1629)

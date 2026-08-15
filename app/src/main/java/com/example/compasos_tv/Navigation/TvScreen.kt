@@ -6,4 +6,8 @@ sealed class TvScreen(val route: String, val titulo: String) {
     object AlertasRecibidas : TvScreen("tv_alertas_recibidas",  "Alertas")
     object FamiliaEnLinea   : TvScreen("tv_familia",            "Familia")
     object Configuracion    : TvScreen("tv_configuracion",      "Configuración")
+
+    object Videos : TvScreen("tv_videos", "videos")
+
+
 }

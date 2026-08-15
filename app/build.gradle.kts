@@ -14,7 +14,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.compasos_tv"
-        minSdk = 36
+        minSdk = 26
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
@@ -68,6 +68,8 @@ dependencies {
     implementation("org.eclipse.paho:org.eclipse.paho.android.service:1.1.1")
     implementation("com.mapbox.maps:android:11.8.0")
     implementation("com.mapbox.extension:maps-compose:11.8.0")
+
+    implementation("io.coil-kt:coil-compose:2.6.0")
 
 
 

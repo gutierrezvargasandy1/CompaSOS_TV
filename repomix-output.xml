@@ -121,7 +121,7 @@ package com.example.compasos_tv.config
 
 
 object MqttConfig {
-    const val BROKER_URL       = "tcp://192.168.1.22:1883"
+    const val BROKER_URL       = "tcp://10.23.227.154:1883"
     const val TIMEOUT_CONEXION = 10
     const val KEEP_ALIVE       = 60
     const val QOS              = 1
@@ -183,101 +183,118 @@ class MqttManager {
 </file>
 
 <file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/AlertaTvDao.kt">
-package com.example.compasos_tv.data.entitys.dao
+package com.example.compasos_tv.data.entitys
 
 import androidx.room.*
-import com.example.compasos_tv.data.entitys.AlertaTvEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface AlertaTvDao {
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertar(alerta: AlertaTvEntity)
+
+    // Banner: última alerta activa no leída
+    @Query("SELECT * FROM alertas_tv WHERE leida = 0 ORDER BY fecha DESC LIMIT 1")
+    fun observarUltimaNoLeida(): Flow<AlertaTvEntity?>
+
+    // Historial reciente (últimas 30) — usado por DashboardTvViewModel
+    @Query("SELECT * FROM alertas_tv ORDER BY fecha DESC LIMIT 30")
+    fun observarRecientes(): Flow<List<AlertaTvEntity>>
+
+    // Todas sin límite — resuelve "Unresolved reference 'observarTodas'"
     @Query("SELECT * FROM alertas_tv ORDER BY fecha DESC")
     fun observarTodas(): Flow<List<AlertaTvEntity>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertar(alerta: AlertaTvEntity)
+    // Contador badge — resuelve "Unresolved reference 'contarNoLeidas'"
+    @Query("SELECT COUNT(*) FROM alertas_tv WHERE leida = 0")
+    fun contarNoLeidas(): Flow<Int>
 
     @Query("UPDATE alertas_tv SET leida = 1 WHERE id = :id")
     suspend fun marcarLeida(id: String)
 
-    @Query("SELECT COUNT(*) FROM alertas_tv WHERE leida = 0")
-    fun contarNoLeidas(): Flow<Int>
+    @Query("UPDATE alertas_tv SET leida = 1")
+    suspend fun marcarTodasLeidas()
 }
 </file>
 
 <file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/ConfigTvDao.kt">
-package com.example.compasos_tv.data.entitys.dao
+package com.example.compasos_tv.data.entitys
 
 import androidx.room.*
-import com.example.compasos_tv.data.entitys.ConfigTvEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ConfigTvDao {
 
-    @Query("SELECT * FROM config_tv WHERE id = 1")
-    fun observar(): Flow<ConfigTvEntity?>
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun guardar(config: ConfigTvEntity)
 
     @Query("SELECT * FROM config_tv WHERE id = 1")
     suspend fun obtener(): ConfigTvEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun guardar(config: ConfigTvEntity)
+    @Query("SELECT * FROM config_tv WHERE id = 1")
+    fun observar(): Flow<ConfigTvEntity?>
 
     @Query("UPDATE config_tv SET codigoVinculacion = :codigo WHERE id = 1")
     suspend fun setCodigo(codigo: String)
 
     @Query("""
-        UPDATE config_tv SET
-            vinculado          = 1,
-            usuarioIdVinculado = :usuarioId,
-            nombreUsuario      = :nombre,
-            emailUsuario       = :email,
-            codigoVinculacion  = '',
-            ultimaActualizacion = :ts
+        UPDATE config_tv
+        SET vinculado            = 1,
+            usuarioIdVinculado   = :usuarioId,
+            nombreUsuario        = :nombre,
+            emailUsuario         = :email,
+            ultimaActualizacion  = :ts
         WHERE id = 1
     """)
-    suspend fun confirmarVinculacion(usuarioId: String, nombre: String, email: String, ts: Long)
+    suspend fun confirmarVinculacion(
+        usuarioId: String,
+        nombre:    String,
+        email:     String,
+        ts:        Long
+    )
 
-    @Query("UPDATE config_tv SET vinculado = 0, usuarioIdVinculado = '' WHERE id = 1")
+    @Query("""
+        UPDATE config_tv
+        SET vinculado          = 0,
+            usuarioIdVinculado = '',
+            nombreUsuario      = '',
+            emailUsuario       = '',
+            codigoVinculacion  = ''
+        WHERE id = 1
+    """)
     suspend fun desvincular()
 }
 </file>
 
 <file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/FamiliarTvDao.kt">
-package com.example.compasos_tv.data.entitys.dao
+package com.example.compasos_tv.data.entitys
 
 import androidx.room.*
-import com.example.compasos_tv.data.entitys.FamiliarTvEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface FamiliarTvDao {
 
-    // Flow reactivo → el mapa se actualiza automáticamente
-    @Query("SELECT * FROM familiares_tv")
-    fun observarTodos(): Flow<List<FamiliarTvEntity>>
-
-    @Query("SELECT * FROM familiares_tv")
-    suspend fun obtenerTodos(): List<FamiliarTvEntity>
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertar(familiar: FamiliarTvEntity)
 
-    // Actualizar solo la ubicación sin tocar el resto del perfil
     @Query("""
-        UPDATE familiares_tv SET
-            latitud              = :lat,
-            longitud             = :lng,
+        UPDATE familiares_tv
+        SET latitud = :lat,
+            longitud = :lng,
             ultimaUbicacionFecha = :fecha,
-            enLinea              = 1
+            enLinea = 1
         WHERE usuarioId = :id
     """)
     suspend fun actualizarUbicacion(id: String, lat: Double, lng: Double, fecha: String)
 
-    @Query("DELETE FROM familiares_tv")
-    suspend fun limpiar()
+    @Query("SELECT * FROM familiares_tv ORDER BY nombre ASC")
+    fun observarTodos(): Flow<List<FamiliarTvEntity>>
+
+    @Query("UPDATE familiares_tv SET enLinea = 0")
+    suspend fun marcarTodosDesconectados()
 }
 </file>
 
@@ -310,27 +327,22 @@ data class AlertaTvEntity(
 package com.example.compasos_tv.data.entitys
 
 import android.content.Context
-import androidx.room.Database
-import androidx.room.Room
-import androidx.room.RoomDatabase
-import com.example.compasos_tv.data.entitys.dao.AlertaTvDao
-import com.example.compasos_tv.data.entitys.dao.ConfigTvDao
-import com.example.compasos_tv.data.entitys.dao.FamiliarTvDao
+import androidx.room.*
 
 @Database(
     entities = [
-        ConfigTvEntity::class,
+        AlertaTvEntity::class,
         FamiliarTvEntity::class,
-        AlertaTvEntity::class
+        ConfigTvEntity::class
     ],
     version = 1,
     exportSchema = false
 )
 abstract class AppDatabaseTv : RoomDatabase() {
 
-    abstract fun configTvDao(): ConfigTvDao
+    abstract fun alertaTvDao():   AlertaTvDao
     abstract fun familiarTvDao(): FamiliarTvDao
-    abstract fun alertaTvDao(): AlertaTvDao
+    abstract fun configTvDao():   ConfigTvDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabaseTv? = null
@@ -341,7 +353,10 @@ abstract class AppDatabaseTv : RoomDatabase() {
                     context.applicationContext,
                     AppDatabaseTv::class.java,
                     "compasos_tv.db"
-                ).build().also { INSTANCE = it }
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
     }
 }
@@ -402,6 +417,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.compasos_tv.Screan.*
+import com.example.compasos_tv.screan.VinculacionScreen
 
 @Composable
 fun TvNavigation() {
@@ -962,18 +978,18 @@ import com.example.compasos_tv.data.entitys.AppDatabaseTv
 import com.example.compasos_tv.data.entitys.FamiliarTvEntity
 import com.mapbox.common.MapboxOptions
 import com.mapbox.geojson.Point
-import com.mapbox.maps.CameraOptions           // ← import explícito
+import com.mapbox.maps.CameraOptions
 import com.mapbox.maps.MapboxExperimental
-import com.mapbox.maps.MapboxMap
+// ✅ ELIMINADO: import com.mapbox.maps.MapboxMap       → conflicto con el compose
+// ✅ ELIMINADO: import com.mapbox.maps.plugin.annotation.AnnotationType → no usado
 import com.mapbox.maps.Style
-import com.mapbox.maps.plugin.annotation.AnnotationType
+import com.mapbox.maps.extension.compose.MapboxMap       // única versión necesaria
+import com.mapbox.maps.extension.compose.animation.viewport.rememberMapViewportState
+import com.mapbox.maps.extension.compose.annotation.generated.PointAnnotation
+import com.mapbox.maps.extension.compose.style.MapStyle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import com.mapbox.maps.extension.compose.MapboxMap
-import com.mapbox.maps.extension.compose.style.MapStyle
-import com.mapbox.maps.extension.compose.animation.viewport.rememberMapViewportState
-import com.mapbox.maps.extension.compose.annotation.generated.PointAnnotation
 
 private val DPanel    = Color(0xFF0F1629)
 private val DTexto    = Color(0xFFE0E0E0)
@@ -987,8 +1003,8 @@ private val DGris     = Color(0xFF424242)
 
 class TvDashboardViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val db    = AppDatabaseTv.getInstance(app)
-    val familiares    = db.familiarTvDao().observarTodos()
+    private val db = AppDatabaseTv.getInstance(app)
+    val familiares = db.familiarTvDao().observarTodos()
 
     private val _seleccionado = MutableStateFlow<FamiliarTvEntity?>(null)
     val seleccionado: StateFlow<FamiliarTvEntity?> = _seleccionado.asStateFlow()
@@ -1018,13 +1034,11 @@ fun TvDashboardScreen() {
     val familiares   by vm.familiares.collectAsState(initial = emptyList())
     val seleccionado by vm.seleccionado.collectAsState()
 
-    // ✅ Fix 1: token directo, evita el warning de LocalContext + getString
     remember {
         MapboxOptions.accessToken =
             "pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ"
     }
 
-    // ✅ Fix 2: CameraOptions.Builder en lugar del DSL — evita conflicto con Expression.zoom()
     val mapViewportState = rememberMapViewportState {
         setCameraOptions(
             CameraOptions.Builder()
@@ -1034,7 +1048,6 @@ fun TvDashboardScreen() {
         )
     }
 
-    // Mueve la cámara cuando el usuario selecciona un familiar
     LaunchedEffect(seleccionado) {
         val lat = seleccionado?.latitud  ?: return@LaunchedEffect
         val lng = seleccionado?.longitud ?: return@LaunchedEffect
@@ -1095,24 +1108,29 @@ fun TvDashboardScreen() {
 
         // ── Separador ─────────────────────────────────────────────────────────
         Box(
-            modifier = Modifier.width(1.dp).fillMaxHeight()
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
                 .background(Color.White.copy(alpha = 0.06f))
         )
 
         // ── Mapa ──────────────────────────────────────────────────────────────
         Box(modifier = Modifier.fillMaxSize()) {
 
-            // ✅ Fix 3: MapboxMap, MapStyle y PointAnnotation con imports explícitos
             MapboxMap(
-                modifier = Modifier.fillMaxSize(),
+                modifier         = Modifier.fillMaxSize(),
                 mapViewportState = mapViewportState,
-                scaleBar = {},
-                style = { MapStyle(style = Style.DARK) }
+                scaleBar         = {},
+                style            = { MapStyle(style = Style.DARK) }
             ) {
+                // ✅ Corregido: if en lugar de return@forEach (composables no pueden
+                //    tener retornos anticipados dentro de lambdas no-composables)
                 familiares.forEach { familiar ->
-                    val lat = familiar.latitud ?: return@forEach
-                    val lng = familiar.longitud ?: return@forEach
-                    PointAnnotation(point = Point.fromLngLat(lng, lat))
+                    if (familiar.latitud != null && familiar.longitud != null) {
+                        PointAnnotation(
+                            point = Point.fromLngLat(familiar.longitud, familiar.latitud)
+                        )
+                    }
                 }
             }
 
@@ -1141,9 +1159,11 @@ fun TvDashboardScreen() {
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Box(
-                                modifier = Modifier.size(7.dp).background(
-                                    if (f.enLinea) DVerde else DGris, CircleShape
-                                )
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .background(
+                                        if (f.enLinea) DVerde else DGris, CircleShape
+                                    )
                             )
                             Text(
                                 if (f.enLinea) "En línea" else "Sin conexión",
@@ -1153,11 +1173,19 @@ fun TvDashboardScreen() {
                         }
                         f.latitud?.let { lat ->
                             f.longitud?.let { lng ->
-                                Text("%.5f, %.5f".format(lat, lng), fontSize = 11.sp, color = DSecund)
+                                Text(
+                                    "%.5f, %.5f".format(lat, lng),
+                                    fontSize = 11.sp,
+                                    color    = DSecund
+                                )
                             }
                         }
                         f.ultimaUbicacionFecha?.let {
-                            Text("Últ. act: ${it.take(16)}", fontSize = 11.sp, color = DSecund.copy(alpha = 0.7f))
+                            Text(
+                                "Últ. act: ${it.take(16)}",
+                                fontSize = 11.sp,
+                                color    = DSecund.copy(alpha = 0.7f)
+                            )
                         }
                     }
                 }
@@ -1172,7 +1200,11 @@ fun TvDashboardScreen() {
                         .background(DPanel.copy(alpha = 0.85f), RoundedCornerShape(20.dp))
                         .padding(horizontal = 20.dp, vertical = 8.dp)
                 ) {
-                    Text("Selecciona un familiar para centrar el mapa", fontSize = 13.sp, color = DSecund)
+                    Text(
+                        "Selecciona un familiar para centrar el mapa",
+                        fontSize = 13.sp,
+                        color    = DSecund
+                    )
                 }
             }
         }
@@ -1213,10 +1245,13 @@ private fun FamiliarMapCard(
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Box(
-            modifier = Modifier.size(36.dp).background(
-                if (seleccionado) Color.White.copy(alpha = 0.25f) else DAzul.copy(alpha = 0.3f),
-                CircleShape
-            ),
+            modifier = Modifier
+                .size(36.dp)
+                .background(
+                    if (seleccionado) Color.White.copy(alpha = 0.25f)
+                    else DAzul.copy(alpha = 0.3f),
+                    CircleShape
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(
@@ -1240,9 +1275,11 @@ private fun FamiliarMapCard(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Box(
-                    modifier = Modifier.size(5.dp).background(
-                        if (familiar.enLinea) DVerde else DGris, CircleShape
-                    )
+                    modifier = Modifier
+                        .size(5.dp)
+                        .background(
+                            if (familiar.enLinea) DVerde else DGris, CircleShape
+                        )
                 )
                 Text(
                     if (familiar.enLinea) "En línea" else "Sin conexión",
@@ -1253,11 +1290,11 @@ private fun FamiliarMapCard(
         }
 
         Icon(
-            imageVector = if (familiar.latitud != null)
+            imageVector        = if (familiar.latitud != null)
                 Icons.Default.LocationOn else Icons.Default.LocationOff,
             contentDescription = null,
-            tint     = if (familiar.latitud != null) DVerde else DGris,
-            modifier = Modifier.size(15.dp)
+            tint               = if (familiar.latitud != null) DVerde else DGris,
+            modifier           = Modifier.size(15.dp)
         )
     }
 }
@@ -1671,7 +1708,7 @@ private fun TvNavItemRow(
 </file>
 
 <file path="app/src/main/java/com/example/compasos_tv/Screan/VinculacionScreen.kt">
-package com.example.compasos_tv.Screan
+package com.example.compasos_tv.screan
 
 import android.app.Application
 import android.os.Build
@@ -1681,77 +1718,87 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.Button
+import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
+import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.example.compasos_tv.data.entitys.AppDatabaseTv
-import com.example.compasos_tv.services.TvMqttService
 import com.example.compasos_tv.services.VinculacionTvRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-// ── Colores ───────────────────────────────────────────────────────────────────
-
-private val VFondo      = Color(0xFF0A0E1A)
-private val VPanel      = Color(0xFF0F1629)
-private val VTexto      = Color(0xFFE0E0E0)
-private val VSecund     = Color(0xFF9E9E9E)
-private val VAzul       = Color(0xFF1565C0)
-private val VRojo       = Color(0xFFE53935)
-
-// ── Estado ────────────────────────────────────────────────────────────────────
+private val vFondo  = Color(0xFF0A0E1A)
+private val vPanel  = Color(0xFF0F1629)
+private val vTexto  = Color(0xFFE0E0E0)
+private val vSecund = Color(0xFF9E9E9E)
+private val vAzul   = Color(0xFF1565C0)
+private val vRojo   = Color(0xFFE53935)
 
 sealed class EstadoVinculacion {
-    object Iniciando                          : EstadoVinculacion()
-    object Esperando                          : EstadoVinculacion()
-    data class Error(val mensaje: String)     : EstadoVinculacion()
+    object Ingresando                   : EstadoVinculacion()
+    object Esperando                    : EstadoVinculacion()
+    data class Error(val mensaje: String) : EstadoVinculacion()
 }
 
-// ── ViewModel ─────────────────────────────────────────────────────────────────
-
 class VinculacionTvViewModel(app: Application) : AndroidViewModel(app) {
-
     private val repo = VinculacionTvRepository(app)
     val config       = repo.observarConfig()
 
-    private val _codigo = MutableStateFlow("")
-    val codigo: StateFlow<String> = _codigo.asStateFlow()
-
-    private val _estado = MutableStateFlow<EstadoVinculacion>(EstadoVinculacion.Iniciando)
+    private val _estado = MutableStateFlow<EstadoVinculacion>(EstadoVinculacion.Ingresando)
     val estado: StateFlow<EstadoVinculacion> = _estado.asStateFlow()
 
-    fun generarCodigo() {
+    fun confirmarCodigo(codigo: String) {
+        if (codigo.isBlank()) return
         viewModelScope.launch {
-            _estado.value = EstadoVinculacion.Iniciando
+            _estado.value = EstadoVinculacion.Esperando
             try {
-                _codigo.value = repo.iniciarVinculacion()
-                _estado.value = EstadoVinculacion.Esperando
+                repo.solicitarVinculacion(codigo) { _, _, _ -> }
             } catch (e: Exception) {
                 _estado.value = EstadoVinculacion.Error(e.message ?: "Sin conexión al broker MQTT")
             }
         }
+    }
+
+    fun reintentar() {
+        _estado.value = EstadoVinculacion.Ingresando
     }
 
     class Factory(private val app: Application) : ViewModelProvider.Factory {
@@ -1761,9 +1808,7 @@ class VinculacionTvViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
-// ── Screen ────────────────────────────────────────────────────────────────────
-
-@OptIn(ExperimentalTvMaterial3Api::class)
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun VinculacionScreen(onVinculado: () -> Unit) {
     val context = LocalContext.current
@@ -1771,135 +1816,336 @@ fun VinculacionScreen(onVinculado: () -> Unit) {
         factory = VinculacionTvViewModel.Factory(context.applicationContext as Application)
     )
     val config by vm.config.collectAsState(initial = null)
-    val codigo by vm.codigo.collectAsState()
     val estado by vm.estado.collectAsState()
-    val tvId   = remember {
+    val tvId = remember {
         Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
     }
 
-    // Si ya estaba vinculado → navegar inmediatamente
+    var codigoIngresado by remember { mutableStateOf("") }
+    var mostrarDialogoCodigo by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+
     LaunchedEffect(Unit) {
         val cfg = AppDatabaseTv.getInstance(context).configTvDao().obtener()
-        if (cfg?.vinculado == true) { onVinculado(); return@LaunchedEffect }
-        vm.generarCodigo()
+        if (cfg?.vinculado == true) onVinculado()
     }
 
-    // Cuando el teléfono confirma la vinculación → navegar
     LaunchedEffect(config) {
         if (config?.vinculado == true) onVinculado()
     }
 
     Box(
-        modifier         = Modifier.fillMaxSize().background(VFondo),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(vFondo),
         contentAlignment = Alignment.Center
     ) {
         Row(
-            modifier              = Modifier.fillMaxSize().padding(60.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(60.dp),
             horizontalArrangement = Arrangement.spacedBy(48.dp),
-            verticalAlignment     = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // ── Instrucciones ──────────────────────────────────────────────────
             Column(
-                modifier            = Modifier.weight(1f),
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
                 Row(
-                    verticalAlignment     = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Icon(
-                        Icons.Default.Tv, null,
-                        tint     = VRojo,
-                        modifier = Modifier.size(42.dp)
-                    )
-                    Text(
-                        "CompaSOS TV",
-                        fontSize   = 34.sp,
-                        fontWeight = FontWeight.Bold,
-                        color      = VTexto
-                    )
+                    Icon(Icons.Default.Tv, null, tint = vRojo, modifier = Modifier.size(42.dp))
+                    Text("compasos tv", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = vTexto)
                 }
 
                 Spacer(Modifier.height(8.dp))
 
                 Text(
-                    "Para vincular esta pantalla:",
-                    fontSize   = 18.sp,
-                    color      = VTexto,
+                    "para vincular esta pantalla:",
+                    fontSize = 18.sp,
+                    color = vTexto,
                     fontWeight = FontWeight.SemiBold
                 )
 
-                PasoVinculacion("1", "Abre la app CompaSOS en tu teléfono")
-                PasoVinculacion("2", "Ve a Dispositivos → Vincular pantalla TV")
-                PasoVinculacion("3", "Ingresa el código que aparece a la derecha")
+                PasoVinculacion("1", "abre la app compasos en tu teléfono")
+                PasoVinculacion("2", "ve a dispositivos → vincular pantalla tv")
+                PasoVinculacion("3", "selecciona el recuadro azul para ingresar el código")
 
                 Spacer(Modifier.height(16.dp))
 
                 Row(
-                    verticalAlignment     = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(Icons.Default.Wifi, null, tint = VSecund, modifier = Modifier.size(16.dp))
-                    Text("Modelo: ${Build.MODEL}  ·  ID: tv_$tvId", fontSize = 12.sp, color = VSecund)
+                    Icon(Icons.Default.Wifi, null, tint = vSecund, modifier = Modifier.size(16.dp))
+                    Text(
+                        "modelo: ${Build.MODEL}  ·  id: tv_$tvId",
+                        fontSize = 12.sp,
+                        color = vSecund
+                    )
                 }
             }
 
-            // ── Panel del código ───────────────────────────────────────────────
             Box(
                 modifier = Modifier
                     .width(420.dp)
-                    .background(VPanel, RoundedCornerShape(24.dp))
-                    .border(2.dp, VAzul.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
+                    .background(vPanel, RoundedCornerShape(24.dp))
+                    .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
                     .padding(horizontal = 44.dp, vertical = 48.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Código de vinculación", fontSize = 15.sp, color = VSecund)
-
                     when (val e = estado) {
-                        is EstadoVinculacion.Iniciando -> {
-                            CircularProgressIndicator(color = VAzul, modifier = Modifier.size(52.dp))
-                            Text("Conectando...", fontSize = 14.sp, color = VSecund)
+                        is EstadoVinculacion.Ingresando -> {
+                            Text("código del teléfono", fontSize = 15.sp, color = vSecund)
+
+                            Surface(
+                                onClick = { mostrarDialogoCodigo = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(72.dp),
+                                shape = ClickableSurfaceDefaults.shape(
+                                    shape = RoundedCornerShape(12.dp)
+                                ),
+                                colors = ClickableSurfaceDefaults.colors(
+                                    containerColor = vFondo,
+                                    focusedContainerColor = vAzul.copy(alpha = 0.3f)
+                                )
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                        .padding(16.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (codigoIngresado.isEmpty()) {
+                                        Text(
+                                            "presiona enter para ingresar",
+                                            fontSize = 18.sp,
+                                            color = vSecund,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    } else {
+                                        Text(
+                                            codigoIngresado.chunked(3).joinToString("  "),
+                                            fontSize = 36.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = Color.White,
+                                            letterSpacing = 4.sp,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Button(
+                                    onClick = {
+                                        if (codigoIngresado.length >= 4) {
+                                            vm.confirmarCodigo(codigoIngresado)
+                                        }
+                                    },
+                                    enabled = codigoIngresado.length >= 4,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("vincular", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                Button(
+                                    onClick = { codigoIngresado = "" },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("limpiar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
 
                         is EstadoVinculacion.Esperando -> {
-                            // Código grande legible desde el sillón
+                            CircularProgressIndicator(color = vAzul, modifier = Modifier.size(52.dp))
+
                             Text(
-                                text          = codigo.chunked(3).joinToString("  "),
-                                fontSize      = 72.sp,
-                                fontWeight    = FontWeight.ExtraBold,
-                                fontFamily    = FontFamily.Monospace,
-                                color         = Color.White,
+                                codigoIngresado.chunked(3).joinToString("  "),
+                                fontSize = 40.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White,
                                 letterSpacing = 3.sp
                             )
 
                             PuntosAnimados()
 
                             Text(
-                                "Esperando confirmación del teléfono...",
-                                fontSize  = 13.sp,
-                                color     = VSecund,
+                                "esperando confirmación del teléfono...",
+                                fontSize = 13.sp,
+                                color = vSecund,
                                 textAlign = TextAlign.Center
                             )
+
+                            Button(onClick = { vm.reintentar() }) {
+                                Text("cambiar código", fontSize = 14.sp)
+                            }
                         }
 
                         is EstadoVinculacion.Error -> {
-                            Text("Sin conexión", fontSize = 16.sp, color = VRojo)
-                            Text(e.mensaje, fontSize = 12.sp, color = VSecund, textAlign = TextAlign.Center)
-                            TextButton(onClick = { vm.generarCodigo() }) {
-                                Text("Reintentar", color = VAzul, fontSize = 16.sp)
+                            Text("sin conexión", fontSize = 16.sp, color = vRojo)
+                            Text(e.mensaje, fontSize = 12.sp, color = vSecund, textAlign = TextAlign.Center)
+                            Button(onClick = { vm.reintentar() }) {
+                                Text("reintentar", fontSize = 16.sp)
                             }
                         }
                     }
 
                     Text(
-                        "Válido por 5 minutos",
+                        "el código lo genera la app en tu teléfono",
                         fontSize = 11.sp,
-                        color    = VSecund.copy(alpha = 0.5f)
+                        color = vSecund.copy(alpha = 0.5f)
                     )
+                }
+            }
+        }
+    }
+
+    if (mostrarDialogoCodigo) {
+        DialogCodigo(
+            codigo = codigoIngresado,
+            onCodigoChange = { nuevo ->
+                if (nuevo.length <= 6) {
+                    codigoIngresado = nuevo.uppercase()
+                }
+            },
+            onConfirmar = {
+                mostrarDialogoCodigo = false
+                focusManager.clearFocus()
+                if (codigoIngresado.length >= 4) {
+                    vm.confirmarCodigo(codigoIngresado)
+                }
+            },
+            onCancelar = {
+                mostrarDialogoCodigo = false
+                focusManager.clearFocus()
+            },
+            onLimpiar = {
+                codigoIngresado = ""
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun DialogCodigo(
+    codigo: String,
+    onCodigoChange: (String) -> Unit,
+    onConfirmar: () -> Unit,
+    onCancelar: () -> Unit,
+    onLimpiar: () -> Unit
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        delay(300)
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    Dialog(
+        onDismissRequest = onCancelar,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.7f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(500.dp)
+                    .background(vPanel, RoundedCornerShape(24.dp))
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
+                Text(
+                    "ingresa el código",
+                    fontSize = 20.sp,
+                    color = vTexto,
+                    fontWeight = FontWeight.Bold
+                )
+
+                OutlinedTextField(
+                    value = codigo,
+                    onValueChange = onCodigoChange,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        letterSpacing = 4.sp
+                    ),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            if (codigo.length >= 4) {
+                                onConfirmar()
+                            }
+                        }
+                    ),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = vFondo,
+                        unfocusedContainerColor = vFondo,
+                        focusedBorderColor = vAzul,
+                        unfocusedBorderColor = vAzul.copy(alpha = 0.4f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = vAzul
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = onCancelar,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("cancelar", fontSize = 16.sp)
+                    }
+
+                    Button(
+                        onClick = onLimpiar,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("limpiar", fontSize = 16.sp)
+                    }
+
+                    Button(
+                        onClick = onConfirmar,
+                        enabled = codigo.length >= 4,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("aceptar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -1910,11 +2156,13 @@ fun VinculacionScreen(onVinculado: () -> Unit) {
 @Composable
 private fun PasoVinculacion(numero: String, texto: String) {
     Row(
-        verticalAlignment     = Alignment.CenterVertically,
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Box(
-            modifier         = Modifier.size(32.dp).background(VAzul, CircleShape),
+            modifier = Modifier
+                .size(32.dp)
+                .background(vAzul, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Text(numero, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
@@ -1928,7 +2176,7 @@ private fun PuntosAnimados() {
     var puntos by remember { mutableStateOf(1) }
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(600)
+            delay(600)
             puntos = if (puntos >= 3) 1 else puntos + 1
         }
     }
@@ -1938,7 +2186,7 @@ private fun PuntosAnimados() {
                 modifier = Modifier
                     .size(10.dp)
                     .clip(CircleShape)
-                    .background(if (i < puntos) VAzul else VAzul.copy(alpha = 0.25f))
+                    .background(if (i < puntos) vAzul else vAzul.copy(alpha = 0.25f))
             )
         }
     }
@@ -2033,12 +2281,7 @@ class TvMqttService : Service() {
                     scope.launch { procesarUbicacion(payload) }
                 }
 
-                // Respuesta de vinculación del teléfono
-                mqtt.suscribir(
-                    "${MqttConfig.TOPIC_VINCULACION}/tv/$tvId/respuesta"
-                ) { _, payload ->
-                    scope.launch { procesarRespuestaVinculacion(payload) }
-                }
+
 
                 Log.d("TvMqttSvc", "✅ Suscrito a topics de TV: $tvId")
 
@@ -2179,48 +2422,78 @@ class TvMqttService : Service() {
 package com.example.compasos_tv.services
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.example.compasos_tv.config.MqttConfig
 import com.example.compasos_tv.config.MqttManager
 import com.example.compasos_tv.data.entitys.AppDatabaseTv
 import com.example.compasos_tv.data.entitys.ConfigTvEntity
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class VinculacionTvRepository(private val context: Context) {
 
-    private val db  = AppDatabaseTv.getInstance(context)
-    private val dao = db.configTvDao()
-    private val mqtt = MqttManager()
+    private val db    = AppDatabaseTv.getInstance(context)
+    private val dao   = db.configTvDao()
+    private val mqtt  = MqttManager()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun observarConfig(): Flow<ConfigTvEntity?> = dao.observar()
 
     /**
-     * Genera un código de 6 caracteres, lo muestra en pantalla
-     * y publica la solicitud de vinculación para que el teléfono la reciba.
+     * El código lo genera y muestra el TELÉFONO. El usuario lo lee ahí
+     * y lo escribe aquí en la TV. Con ese código, la TV publica su
+     * solicitud y espera la confirmación del teléfono.
      */
-    suspend fun iniciarVinculacion(): String = withContext(Dispatchers.IO) {
-        val tvId  = TvMqttService.obtenerTvId(context)
-        val codigo = (100000..999999).random().toString()
+    suspend fun solicitarVinculacion(
+        codigo: String,
+        onConfirmada: (usuarioId: String, nombre: String, email: String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val tvId = TvMqttService.obtenerTvId(context)
 
-        // Asegurar que existe la fila singleton
         if (dao.obtener() == null) {
             dao.guardar(ConfigTvEntity(tvDeviceId = tvId))
         }
         dao.setCodigo(codigo)
 
-        // Publicar solicitud → el teléfono la recibirá en su AlertaMqttService
         if (!mqtt.estaConectado) mqtt.conectar()
-        val payload = org.json.JSONObject().apply {
+
+        // Suscribirse ANTES de publicar para no perder la respuesta
+        val topicRespuesta = "${MqttConfig.TOPIC_VINCULACION}/tv/$codigo/respuesta"
+        mqtt.suscribir(topicRespuesta) { _, payload ->
+            scope.launch {
+                try {
+                    val json      = JSONObject(payload)
+                    val usuarioId = json.optString("usuarioId")
+                    val nombre    = json.optString("nombre")
+                    val email     = json.optString("email")
+
+                    dao.confirmarVinculacion(
+                        usuarioId = usuarioId,
+                        nombre    = nombre,
+                        email     = email,
+                        ts        = System.currentTimeMillis()
+                    )
+                    onConfirmada(usuarioId, nombre, email)
+                    Log.d("VinculacionTv", "✅ Vinculación confirmada por el teléfono")
+                } catch (e: Exception) {
+                    Log.e("VinculacionTv", "Error procesando respuesta: ${e.message}")
+                }
+            }
+        }
+
+        val payload = JSONObject().apply {
             put("tvId",   tvId)
             put("codigo", codigo)
-            put("modelo", android.os.Build.MODEL)
+            put("modelo", Build.MODEL)
         }.toString()
-        mqtt.publicar("${MqttConfig.TOPIC_VINCULACION}/tv/$tvId/solicitud", payload)
+        mqtt.publicar("${MqttConfig.TOPIC_VINCULACION}/tv/$codigo/solicitud", payload)
         Log.d("VinculacionTv", "Solicitud publicada con código: $codigo")
-
-        codigo
     }
 
     suspend fun desvincular() = withContext(Dispatchers.IO) {
