@@ -7,32 +7,48 @@ import com.example.compasos_tv.config.MqttConfig
 import com.example.compasos_tv.config.MqttManager
 import com.example.compasos_tv.data.entitys.AppDatabaseTv
 import com.example.compasos_tv.data.entitys.ConfigTvEntity
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
+/**
+ * Cambios respecto a tu versión:
+ *
+ * 1. Usa MqttManager.instancia — la MISMA conexión que TvMqttService. Antes
+ *    creaba su propio manager: dos conexiones, y la confirmación llegaba a una
+ *    mientras el servicio escuchaba en la otra.
+ *
+ * 2. REINTENTA la solicitud cada 3 s hasta 60 s. Antes publicabas una sola vez:
+ *    si el teléfono todavía no estaba suscrito en ese milisegundo, el mensaje
+ *    se perdía y la TV se quedaba esperando para siempre.
+ *
+ * 3. Devuelve Boolean para que la pantalla sepa si hubo timeout.
+ */
 class VinculacionTvRepository(private val context: Context) {
 
-    private val db    = AppDatabaseTv.getInstance(context)
-    private val dao   = db.configTvDao()
-    private val mqtt  = MqttManager()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val db   = AppDatabaseTv.getInstance(context)
+    private val dao  = db.configTvDao()
+    private val mqtt = MqttManager.instancia   // ← compartida
+
+    companion object {
+        private const val TAG = "VinculacionTv"
+        private const val REINTENTO_MS = 3_000L
+        private const val TIMEOUT_MS   = 60_000L
+    }
 
     fun observarConfig(): Flow<ConfigTvEntity?> = dao.observar()
 
     /**
-     * El código lo genera y muestra el TELÉFONO. El usuario lo lee ahí
-     * y lo escribe aquí en la TV. Con ese código, la TV publica su
-     * solicitud y espera la confirmación del teléfono.
+     * El código lo genera y muestra el TELÉFONO. El usuario lo lee ahí y lo
+     * escribe aquí en la TV.
+     *
+     * @return true si el teléfono confirmó dentro del timeout.
      */
     suspend fun solicitarVinculacion(
         codigo: String,
         onConfirmada: (usuarioId: String, nombre: String, email: String) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    ): Boolean = withContext(Dispatchers.IO) {
+
         val tvId = TvMqttService.obtenerTvId(context)
 
         if (dao.obtener() == null) {
@@ -40,12 +56,22 @@ class VinculacionTvRepository(private val context: Context) {
         }
         dao.setCodigo(codigo)
 
-        if (!mqtt.estaConectado) mqtt.conectar()
+        if (!mqtt.estaConectado) {
+            try {
+                mqtt.conectar(clientId = "compasos_${tvId.take(24)}")
+            } catch (e: Exception) {
+                Log.e(TAG, "No hay broker: ${e.message}")
+                return@withContext false
+            }
+        }
+
+        val topicRespuesta = MqttConfig.topicRespuesta(codigo)
+        val confirmada = CompletableDeferred<Boolean>()
 
         // Suscribirse ANTES de publicar para no perder la respuesta
-        val topicRespuesta = "${MqttConfig.TOPIC_VINCULACION}/tv/$codigo/respuesta"
         mqtt.suscribir(topicRespuesta) { _, payload ->
-            scope.launch {
+            // El callback corre en el hilo de Paho: no bloquear aquí.
+            CoroutineScope(Dispatchers.IO).launch {
                 try {
                     val json      = JSONObject(payload)
                     val usuarioId = json.optString("usuarioId")
@@ -59,9 +85,11 @@ class VinculacionTvRepository(private val context: Context) {
                         ts        = System.currentTimeMillis()
                     )
                     onConfirmada(usuarioId, nombre, email)
-                    Log.d("VinculacionTv", "✅ Vinculación confirmada por el teléfono")
+                    Log.d(TAG, "✅ Vinculación confirmada por el teléfono")
+                    confirmada.complete(true)
                 } catch (e: Exception) {
-                    Log.e("VinculacionTv", "Error procesando respuesta: ${e.message}")
+                    Log.e(TAG, "Error procesando respuesta: ${e.message}")
+                    confirmada.complete(false)
                 }
             }
         }
@@ -71,11 +99,34 @@ class VinculacionTvRepository(private val context: Context) {
             put("codigo", codigo)
             put("modelo", Build.MODEL)
         }.toString()
-        mqtt.publicar("${MqttConfig.TOPIC_VINCULACION}/tv/$codigo/solicitud", payload)
-        Log.d("VinculacionTv", "Solicitud publicada con código: $codigo")
+
+        val reintentos = launch {
+            while (isActive) {
+                mqtt.publicarSeguro(MqttConfig.topicSolicitud(codigo), payload)
+                Log.d(TAG, "Solicitud publicada con código: $codigo")
+                delay(REINTENTO_MS)
+            }
+        }
+
+        val ok = withTimeoutOrNull(TIMEOUT_MS) { confirmada.await() } ?: false
+
+        reintentos.cancel()
+        if (!ok) {
+            Log.w(TAG, "⏱ El teléfono no confirmó en ${TIMEOUT_MS / 1000}s")
+            mqtt.desuscribir(topicRespuesta)
+        }
+        // Si sí confirmó, dejamos la suscripción viva: TvMqttService la reusa
+        // para re-confirmaciones tras un reinicio.
+        ok
     }
 
     suspend fun desvincular() = withContext(Dispatchers.IO) {
+        val tvId = TvMqttService.obtenerTvId(context)
+        dao.obtener()?.codigoVinculacion?.takeIf { it.isNotBlank() }?.let {
+            mqtt.desuscribir(MqttConfig.topicRespuesta(it))
+        }
+        // Limpia el retained del broker para que la TV no reviva datos viejos
+        mqtt.publicarSeguro(MqttConfig.topicEstadoTv(tvId), "", retained = true)
         dao.desvincular()
     }
 }

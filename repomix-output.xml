@@ -56,21 +56,27 @@ app/
                     AlertaTvDao.kt
                     ConfigTvDao.kt
                     FamiliarTvDao.kt
+                    VideoTvDao.kt
                   AlertaTvEntity.kt
                   AppDatabaseTv.kt
                   ConfigTvEntity.kt
                   FamiliarTvEntity.kt
+                  VideosSeguridadRepository.kt
+                  VideoTvEntity.kt
               Navigation/
                 TvNavigation.kt
                 TvScreen.kt
               Screan/
+                ManejadorTeclasReproductor.kt
                 TvAlertasScreen.kt
                 TvConfiguracionScreen.kt
                 TvDashboardScreen.kt
                 TvFamiliaScreen.kt
                 TvMainScreen.kt
+                TvVideosScreen.kt
                 VinculacionScreen.kt
               services/
+                CategoriaVideo.kt
                 TvMqttService.kt
                 VinculacionTvRepository.kt
               ui/
@@ -115,22 +121,6 @@ settings.gradle.kts
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="app/src/main/java/com/example/compasos_tv/config/MqttConfig.kt">
-package com.example.compasos_tv.config
-
-
-object MqttConfig {
-    const val BROKER_URL       = "tcp://10.23.227.154:1883"
-    const val TIMEOUT_CONEXION = 10
-    const val KEEP_ALIVE       = 60
-    const val QOS              = 1
-
-    // Topics TV ← teléfono
-    const val TOPIC_TV          = "compasos/tv"          // compasos/tv/{tvId}/sesion|alerta|ubicacion
-    const val TOPIC_VINCULACION = "compasos/vinculacion"  // compasos/vinculacion/tv/{tvId}/...
-}
-</file>
 
 <file path="app/src/main/java/com/example/compasos_tv/config/MqttManager.kt">
 package com.example.compasos_tv.config
@@ -298,6 +288,31 @@ interface FamiliarTvDao {
 }
 </file>
 
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/dao/VideoTvDao.kt">
+package com.example.compasos_tv.data.entitys.dao
+
+
+import androidx.room.*
+import com.example.compasos_tv.data.entitys.VideoTvEntity
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface VideoTvDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertarTodos(videos: List<VideoTvEntity>)
+
+    @Query("SELECT * FROM videos_tv WHERE categoria = :categoria ORDER BY fechaCache DESC")
+    fun observarPorCategoria(categoria: String): Flow<List<VideoTvEntity>>
+
+    @Query("DELETE FROM videos_tv WHERE categoria = :categoria")
+    suspend fun borrarCategoria(categoria: String)
+
+    @Query("SELECT MAX(fechaCache) FROM videos_tv WHERE categoria = :categoria")
+    suspend fun ultimaActualizacion(categoria: String): Long?
+}
+</file>
+
 <file path="app/src/main/java/com/example/compasos_tv/data/entitys/AlertaTvEntity.kt">
 package com.example.compasos_tv.data.entitys
 
@@ -321,45 +336,6 @@ data class AlertaTvEntity(
     val fecha:        String,
     val leida:        Boolean  = false
 )
-</file>
-
-<file path="app/src/main/java/com/example/compasos_tv/data/entitys/AppDatabaseTv.kt">
-package com.example.compasos_tv.data.entitys
-
-import android.content.Context
-import androidx.room.*
-
-@Database(
-    entities = [
-        AlertaTvEntity::class,
-        FamiliarTvEntity::class,
-        ConfigTvEntity::class
-    ],
-    version = 1,
-    exportSchema = false
-)
-abstract class AppDatabaseTv : RoomDatabase() {
-
-    abstract fun alertaTvDao():   AlertaTvDao
-    abstract fun familiarTvDao(): FamiliarTvDao
-    abstract fun configTvDao():   ConfigTvDao
-
-    companion object {
-        @Volatile private var INSTANCE: AppDatabaseTv? = null
-
-        fun getInstance(context: Context): AppDatabaseTv =
-            INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabaseTv::class.java,
-                    "compasos_tv.db"
-                )
-                    .fallbackToDestructiveMigration()
-                    .build()
-                    .also { INSTANCE = it }
-            }
-    }
-}
 </file>
 
 <file path="app/src/main/java/com/example/compasos_tv/data/entitys/ConfigTvEntity.kt">
@@ -409,83 +385,147 @@ data class FamiliarTvEntity(
 )
 </file>
 
-<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvNavigation.kt">
-package com.example.compasos_tv.Navigation
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/VideosSeguridadRepository.kt">
+package com.example.compasos_tv.data.entitys
 
-import androidx.compose.runtime.Composable
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import com.example.compasos_tv.Screan.*
-import com.example.compasos_tv.screan.VinculacionScreen
+import android.content.Context
+import android.util.Log
+import com.example.compasos_tv.R
+import com.example.compasos_tv.services.CategoriaVideo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
-@Composable
-fun TvNavigation() {
-    val navController = rememberNavController()
+class VideosSeguridadRepository(private val context: Context) {
 
-    NavHost(
-        navController    = navController,
-        startDestination = TvScreen.Vinculacion.route
-    ) {
-        // ── Vinculación — siempre es el punto de entrada ──────────────────────
-        // La propia pantalla redirige al Dashboard si ya estaba vinculado
-        composable(TvScreen.Vinculacion.route) {
-            VinculacionScreen(
-                onVinculado = {
-                    navController.navigate(TvScreen.Dashboard.route) {
-                        popUpTo(TvScreen.Vinculacion.route) { inclusive = true }
-                    }
-                }
-            )
-        }
+    private val dao = AppDatabaseTv.getInstance(context).videoTvDao()
 
-        // ── Dashboard — mapa sin padding para que ocupe todo el área ──────────
-        composable(TvScreen.Dashboard.route) {
-            TvMainScreen(
-                navController    = navController,
-                rutaSeleccionada = TvScreen.Dashboard.route,
-                padContent       = false          // el mapa ocupa todo el espacio
-            ) {
-                TvDashboardScreen()
+    // 30 min: evita repetir búsquedas y gastar cuota de la API en cada visita a la pantalla
+    private val vigenciaCacheMs = 60 * 1000L // 1 min mientras desarrollas — sube a 30 min antes de entregar
+    fun observarCategoria(categoria: String): Flow<List<VideoTvEntity>> =
+        dao.observarPorCategoria(categoria)
+
+    /**
+     * Refresca la categoría desde YouTube Data API v3 si el caché expiró.
+     * Si falla la red, no propaga la excepción: la UI se queda con lo
+     * que ya haya en Room (observarCategoria sigue funcionando offline).
+     */
+    suspend fun refrescarSiHaceFalta(categoria: CategoriaVideo) = withContext(Dispatchers.IO) {
+        try {
+            val ultima = dao.ultimaActualizacion(categoria.clave) ?: 0L
+            if (System.currentTimeMillis() - ultima < vigenciaCacheMs) return@withContext
+
+            val apiKey = context.getString(R.string.youtube_api_key)
+            if (apiKey.isBlank() || apiKey == "TU_YOUTUBE_API_KEY_AQUI") {
+                Log.w("VideosSeguridad", "Configura youtube_api_key en developer-config.xml")
+                return@withContext
             }
-        }
 
-        composable(TvScreen.AlertasRecibidas.route) {
-            TvMainScreen(navController, TvScreen.AlertasRecibidas.route) {
-                TvAlertasScreen()
-            }
-        }
+            val query = URLEncoder.encode(categoria.consultaBusqueda, "UTF-8")
+            val url = "https://www.googleapis.com/youtube/v3/search" +
+                    "?part=snippet&type=video&maxResults=10" +
+                    "&relevanceLanguage=es&safeSearch=strict&order=relevance" +
+                    "&videoEmbeddable=true&videoSyndicated=true" +
+                    "&q=$query&key=$apiKey"
 
-        composable(TvScreen.FamiliaEnLinea.route) {
-            TvMainScreen(navController, TvScreen.FamiliaEnLinea.route) {
-                TvFamiliaScreen()
-            }
-        }
+            Log.d("VideosSeguridad", "URL: ${url.replace(apiKey, "***")}")
+            val respuesta = obtenerJson(url)
+            val items = respuesta.optJSONArray("items") ?: return@withContext
 
-        composable(TvScreen.Configuracion.route) {
-            TvMainScreen(navController, TvScreen.Configuracion.route) {
-                TvConfiguracionScreen(
-                    onDesvincular = {
-                        navController.navigate(TvScreen.Vinculacion.route) {
-                            popUpTo(0) { inclusive = true }
-                        }
-                    }
+            val videos = mutableListOf<VideoTvEntity>()
+            for (i in 0 until items.length()) {
+                val item = items.getJSONObject(i)
+                val videoId = item.optJSONObject("id")?.optString("videoId") ?: continue
+                val snippet = item.optJSONObject("snippet") ?: continue
+                val thumbs  = snippet.optJSONObject("thumbnails")
+                val thumb   = thumbs?.optJSONObject("high")?.optString("url")
+                    ?: thumbs?.optJSONObject("default")?.optString("url")
+                    ?: ""
+
+                videos += VideoTvEntity(
+                    id = videoId,
+                    categoria = categoria.clave,
+                    titulo = snippet.optString("title"),
+                    canal = snippet.optString("channelTitle"),
+                    thumbnailUrl = thumb,
+                    fechaPublicacion = snippet.optString("publishedAt")
                 )
             }
+
+            if (videos.isNotEmpty()) {
+                dao.borrarCategoria(categoria.clave)
+                dao.insertarTodos(videos)
+                Log.d("VideosSeguridad", "${videos.size} video(s) cargados para '${categoria.clave}'")
+            }
+        } catch (e: Exception) {
+            Log.e("VideosSeguridad", "Error consultando YouTube: ${e.message}")
+        }
+    }
+
+    private fun obtenerJson(urlStr: String): JSONObject {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = 10_000
+        conn.readTimeout = 10_000
+        conn.requestMethod = "GET"
+        return try {
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val texto = stream.bufferedReader().use { it.readText() }
+            if (code !in 200..299) Log.e("VideosSeguridad", "YouTube API respondió $code: $texto")
+            JSONObject(texto)
+        } finally {
+            conn.disconnect()
         }
     }
 }
 </file>
 
-<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvScreen.kt">
-package com.example.compasos_tv.Navigation
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/VideoTvEntity.kt">
+package com.example.compasos_tv.data.entitys
 
-sealed class TvScreen(val route: String, val titulo: String) {
-    object Vinculacion      : TvScreen("tv_vinculacion",        "Vincular")
-    object Dashboard        : TvScreen("tv_dashboard",          "Inicio")
-    object AlertasRecibidas : TvScreen("tv_alertas_recibidas",  "Alertas")
-    object FamiliaEnLinea   : TvScreen("tv_familia",            "Familia")
-    object Configuracion    : TvScreen("tv_configuracion",      "Configuración")
+import androidx.room.Entity
+
+/**
+ * Video de seguridad/prevención cacheado desde YouTube Data API v3.
+ * Clave compuesta (id + categoria): el mismo video puede aparecer
+ * en más de una categoría sin pisarse en el REPLACE.
+ */
+@Entity(tableName = "videos_tv", primaryKeys = ["id", "categoria"])
+data class VideoTvEntity(
+    val id: String,                 // ID del video de YouTube (11 caracteres)
+    val categoria: String,          // clave de la categoría (ver CategoriaVideo)
+    val titulo: String,
+    val canal: String,
+    val thumbnailUrl: String,
+    val fechaPublicacion: String? = null,
+    val fechaCache: Long = System.currentTimeMillis()
+)
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/ManejadorTeclasReproductor.kt">
+package com.example.compasos_tv.Screan
+
+
+import android.view.KeyEvent
+
+/**
+ * Puente entre MainActivity.dispatchKeyEvent (nivel Android View, se
+ * ejecuta ANTES de que el sistema decida qué View tiene el foco) y
+ * TvReproductorScreen (nivel Compose).
+ *
+ * Necesario porque dentro de un WebView el foco nativo de Android y el
+ * foco de Compose no siempre se sincronizan: si depend�amos de
+ * Modifier.onKeyEvent + focusRequester, en algunos casos ninguna vista
+ * termina con el foco real y el control remoto deja de responder por
+ * completo. Interceptando aquí nos aseguramos de recibir la tecla sin
+ * importar qué vista interna del árbol tenga o no el foco.
+ */
+object ManejadorTeclasReproductor {
+    var actual: ((KeyEvent) -> Boolean)? = null
 }
 </file>
 
@@ -1503,175 +1543,220 @@ private fun FamiliarCard(familiar: FamiliarTvEntity) {
 }
 </file>
 
-<file path="app/src/main/java/com/example/compasos_tv/Screan/TvMainScreen.kt">
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvVideosScreen.kt">
 package com.example.compasos_tv.Screan
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import android.app.Application
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.PlayCircleFilled
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.navigation.NavController
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
-import com.example.compasos_tv.Navigation.TvScreen
+import com.example.compasos_tv.data.entitys.VideoTvEntity
+import com.example.compasos_tv.data.entitys.VideosSeguridadRepository
+import com.example.compasos_tv.services.CategoriaVideo
+import com.example.compasos_tv.services.CategoriasVideoSeguridad
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
-data class TvNavItem(val pantalla: TvScreen, val icono: ImageVector)
+private val VPanel    = Color(0xFF0F1629)
+private val VTexto    = Color(0xFFE0E0E0)
+private val VSecund   = Color(0xFF9E9E9E)
+private val VAzul     = Color(0xFF1565C0)
+private val VAzulFoco = Color(0xFF1976D2)
 
-private val itemsNav = listOf(
-    TvNavItem(TvScreen.Dashboard,        Icons.Filled.Home),
-    TvNavItem(TvScreen.AlertasRecibidas, Icons.Filled.Notifications),
-    TvNavItem(TvScreen.FamiliaEnLinea,   Icons.Filled.Face),
-    TvNavItem(TvScreen.Configuracion,    Icons.Filled.Settings)
-)
+// ── ViewModel ─────────────────────────────────────────────────────────────────
 
-private val ColorFondo        = Color(0xFF0A0E1A)
-private val ColorBarra        = Color(0xFF0F1629)
-private val ColorSeleccionado = Color(0xFF1565C0)
-private val ColorFocused      = Color(0xFF1976D2)
-private val ColorTexto        = Color(0xFFE0E0E0)
-private val ColorTextoSecund  = Color(0xFF9E9E9E)
-private val ColorRojo         = Color(0xFFE53935)
+class TvVideosViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val repo = VideosSeguridadRepository(app)
+    val categorias   = CategoriasVideoSeguridad.TODAS
+
+    private val _categoriaSeleccionada = MutableStateFlow(categorias.first())
+    val categoriaSeleccionada: StateFlow<CategoriaVideo> = _categoriaSeleccionada.asStateFlow()
+
+    private val _cargando = MutableStateFlow(false)
+    val cargando: StateFlow<Boolean> = _cargando.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val videos: StateFlow<List<VideoTvEntity>> = _categoriaSeleccionada
+        .flatMapLatest { repo.observarCategoria(it.clave) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    init {
+        seleccionarCategoria(categorias.first())
+    }
+
+    fun seleccionarCategoria(categoria: CategoriaVideo) {
+        _categoriaSeleccionada.value = categoria
+        viewModelScope.launch {
+            _cargando.value = true
+            repo.refrescarSiHaceFalta(categoria)
+            _cargando.value = false
+        }
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            TvVideosViewModel(app) as T
+    }
+}
+
+// ── Reproducción — abre la app de YouTube (o navegador si no está instalada) ──
+
+private fun reproducirEnYoutube(context: Context, videoId: String) {
+    val appIntent = Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube:$videoId")).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        putExtra("force_fullscreen", true)
+    }
+    try {
+        context.startActivity(appIntent)
+        return
+    } catch (e: ActivityNotFoundException) {
+        Log.w("TvVideos", "App de YouTube no encontrada, probando navegador")
+    }
+    val webIntent = Intent(
+        Intent.ACTION_VIEW,
+        Uri.parse("https://www.youtube.com/watch?v=$videoId")
+    ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+    try {
+        context.startActivity(webIntent)
+    } catch (e: ActivityNotFoundException) {
+        Log.e("TvVideos", "No hay ninguna app capaz de reproducir el video")
+    }
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun TvMainScreen(
-    navController:    NavController,
-    rutaSeleccionada: String,
-    padContent:       Boolean = true,          // ← nuevo parámetro
-    contenido:        @Composable () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ColorFondo)
+fun TvVideosScreen() {
+    val context = LocalContext.current
+    val vm: TvVideosViewModel = viewModel(
+        factory = TvVideosViewModel.Factory(context.applicationContext as Application)
+    )
+    val categoriaSel by vm.categoriaSeleccionada.collectAsState()
+    val videos       by vm.videos.collectAsState()
+    val cargando     by vm.cargando.collectAsState()
+
+    Column(
+        modifier            = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // ── Barra lateral ─────────────────────────────────────────────────────
-        Column(
-            modifier = Modifier
-                .width(220.dp)
-                .fillMaxHeight()
-                .background(ColorBarra)
-                .padding(vertical = 24.dp, horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier          = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
-            ) {
-                Icon(
-                    imageVector        = Icons.Filled.Lock,
-                    contentDescription = null,
-                    tint               = ColorRojo,
-                    modifier           = Modifier.size(28.dp)
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text       = "CompaSOS",
-                    color      = ColorTexto,
-                    fontSize   = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            itemsNav.forEach { item ->
-                TvNavItemRow(
-                    item         = item,
-                    seleccionado = rutaSeleccionada == item.pantalla.route,
-                    onClick      = {
-                        if (rutaSeleccionada != item.pantalla.route) {
-                            navController.navigate(item.pantalla.route) {
-                                popUpTo(TvScreen.Dashboard.route) { saveState = true }
-                                launchSingleTop = true
-                                restoreState    = true
-                            }
-                        }
-                    }
-                )
-            }
-
-            Spacer(Modifier.weight(1f))
-
-            Text(
-                text     = "TV v1.0",
-                color    = ColorTextoSecund,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
+            Icon(Icons.Default.VideoLibrary, null, tint = VAzul, modifier = Modifier.size(28.dp))
+            Text("Cuidado personal", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = VTexto)
         }
 
-        Box(
-            modifier = Modifier
-                .width(1.dp)
-                .fillMaxHeight()
-                .background(Color.White.copy(alpha = 0.06f))
-        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(items = vm.categorias, key = { it.clave }) { categoria ->
+                ChipCategoria(
+                    categoria    = categoria,
+                    seleccionada = categoria.clave == categoriaSel.clave,
+                    onClick      = { vm.seleccionarCategoria(categoria) }
+                )
+            }
+        }
 
-        // ── Área de contenido (con o sin padding según pantalla) ──────────────
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (padContent) Modifier.padding(32.dp) else Modifier)
-        ) {
-            contenido()
+        Box(modifier = Modifier.fillMaxSize()) {
+            when {
+                cargando && videos.isEmpty() -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = VAzul)
+                    }
+                }
+                videos.isEmpty() -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(Icons.Default.VideoLibrary, null, tint = VSecund, modifier = Modifier.size(56.dp))
+                            Text("Sin videos disponibles", fontSize = 18.sp, color = VTexto, fontWeight = FontWeight.SemiBold)
+                            Text("Revisa la conexión a internet e inténtalo de nuevo", fontSize = 13.sp, color = VSecund)
+                        }
+                    }
+                }
+                else -> {
+                    LazyVerticalGrid(
+                        columns               = GridCells.Fixed(4),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement   = Arrangement.spacedBy(16.dp)
+                    ) {
+                        items(items = videos, key = { it.id }) { video ->
+                            VideoCard(video = video, onClick = { reproducirEnYoutube(context, video.id) })
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun TvNavItemRow(
-    item:         TvNavItem,
-    seleccionado: Boolean,
-    onClick:      () -> Unit
-) {
+private fun ChipCategoria(categoria: CategoriaVideo, seleccionada: Boolean, onClick: () -> Unit) {
     var tieneFoco by remember { mutableStateOf(false) }
-    val focusRequester = remember { FocusRequester() }
 
-    val colorFondo by animateColorAsState(
-        targetValue = when {
-            seleccionado -> ColorSeleccionado
-            tieneFoco    -> ColorFocused.copy(alpha = 0.4f)
-            else         -> Color.Transparent
-        },
-        animationSpec = tween(150),
-        label         = "nav_color"
-    )
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(colorFondo)
-            .focusRequester(focusRequester)
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                when {
+                    seleccionada -> VAzul
+                    tieneFoco    -> VAzulFoco.copy(alpha = 0.4f)
+                    else         -> VPanel
+                }
+            )
             .onFocusChanged { tieneFoco = it.isFocused }
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyUp &&
@@ -1679,517 +1764,128 @@ private fun TvNavItemRow(
                 ) { onClick(); true } else false
             }
             .focusable()
-            .padding(horizontal = 12.dp, vertical = 14.dp)
+            .padding(horizontal = 18.dp, vertical = 10.dp)
     ) {
-        Icon(
-            imageVector        = item.icono,
-            contentDescription = null,
-            tint               = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
-            modifier           = Modifier.size(22.dp)
-        )
-        Spacer(Modifier.width(12.dp))
         Text(
-            text       = item.pantalla.titulo,
-            color      = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
-            fontSize   = 14.sp,
-            fontWeight = if (seleccionado) FontWeight.SemiBold else FontWeight.Normal
+            categoria.titulo,
+            fontSize   = 13.sp,
+            fontWeight = if (seleccionada) FontWeight.Bold else FontWeight.Normal,
+            color      = if (seleccionada || tieneFoco) Color.White else VSecund
         )
-        if (seleccionado) {
-            Spacer(Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(Color.White)
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun VideoCard(video: VideoTvEntity, onClick: () -> Unit) {
+    var tieneFoco by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(VPanel)
+            .border(
+                2.dp,
+                if (tieneFoco) VAzulFoco else Color.Transparent,
+                RoundedCornerShape(12.dp)
+            )
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+            AsyncImage(
+                model              = video.thumbnailUrl,
+                contentDescription = video.titulo,
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier.fillMaxSize()
+            )
+            if (tieneFoco) {
+                Box(
+                    modifier         = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.25f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.PlayCircleFilled,
+                        contentDescription = "Reproducir",
+                        tint     = Color.White,
+                        modifier = Modifier.size(44.dp)
+                    )
+                }
+            }
+        }
+        Column(
+            modifier            = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                video.titulo,
+                fontSize   = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color      = VTexto,
+                maxLines   = 2,
+                overflow   = TextOverflow.Ellipsis
+            )
+            Text(
+                video.canal,
+                fontSize = 10.sp,
+                color    = VSecund,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
 }
 </file>
 
-<file path="app/src/main/java/com/example/compasos_tv/Screan/VinculacionScreen.kt">
-package com.example.compasos_tv.screan
+<file path="app/src/main/java/com/example/compasos_tv/services/CategoriaVideo.kt">
+package com.example.compasos_tv.services
 
-import android.app.Application
-import android.os.Build
-import android.provider.Settings
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.ExperimentalComposeUiApi
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.tv.material3.Button
-import androidx.tv.material3.ClickableSurfaceDefaults
-import androidx.tv.material3.ExperimentalTvMaterial3Api
-import androidx.tv.material3.Icon
-import androidx.tv.material3.Surface
-import androidx.tv.material3.Text
-import com.example.compasos_tv.data.entitys.AppDatabaseTv
-import com.example.compasos_tv.services.VinculacionTvRepository
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
+/**
+ * Cada categoría define una búsqueda curada en YouTube.
+ * Ajusta consultaBusqueda para afinar los resultados, o agrega
+ * "&channelId=UCxxxx" en VideosSeguridadRepository para restringir
+ * a un canal oficial (Protección Civil, Cruz Roja, etc.).
+ */
+data class CategoriaVideo(
+    val clave: String,
+    val titulo: String,
+    val consultaBusqueda: String
+)
 
-private val vFondo  = Color(0xFF0A0E1A)
-private val vPanel  = Color(0xFF0F1629)
-private val vTexto  = Color(0xFFE0E0E0)
-private val vSecund = Color(0xFF9E9E9E)
-private val vAzul   = Color(0xFF1565C0)
-private val vRojo   = Color(0xFFE53935)
-
-sealed class EstadoVinculacion {
-    object Ingresando                   : EstadoVinculacion()
-    object Esperando                    : EstadoVinculacion()
-    data class Error(val mensaje: String) : EstadoVinculacion()
-}
-
-class VinculacionTvViewModel(app: Application) : AndroidViewModel(app) {
-    private val repo = VinculacionTvRepository(app)
-    val config       = repo.observarConfig()
-
-    private val _estado = MutableStateFlow<EstadoVinculacion>(EstadoVinculacion.Ingresando)
-    val estado: StateFlow<EstadoVinculacion> = _estado.asStateFlow()
-
-    fun confirmarCodigo(codigo: String) {
-        if (codigo.isBlank()) return
-        viewModelScope.launch {
-            _estado.value = EstadoVinculacion.Esperando
-            try {
-                repo.solicitarVinculacion(codigo) { _, _, _ -> }
-            } catch (e: Exception) {
-                _estado.value = EstadoVinculacion.Error(e.message ?: "Sin conexión al broker MQTT")
-            }
-        }
-    }
-
-    fun reintentar() {
-        _estado.value = EstadoVinculacion.Ingresando
-    }
-
-    class Factory(private val app: Application) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-            VinculacionTvViewModel(app) as T
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
-@Composable
-fun VinculacionScreen(onVinculado: () -> Unit) {
-    val context = LocalContext.current
-    val vm: VinculacionTvViewModel = viewModel(
-        factory = VinculacionTvViewModel.Factory(context.applicationContext as Application)
-    )
-    val config by vm.config.collectAsState(initial = null)
-    val estado by vm.estado.collectAsState()
-    val tvId = remember {
-        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-    }
-
-    var codigoIngresado by remember { mutableStateOf("") }
-    var mostrarDialogoCodigo by remember { mutableStateOf(false) }
-    val focusManager = LocalFocusManager.current
-
-    LaunchedEffect(Unit) {
-        val cfg = AppDatabaseTv.getInstance(context).configTvDao().obtener()
-        if (cfg?.vinculado == true) onVinculado()
-    }
-
-    LaunchedEffect(config) {
-        if (config?.vinculado == true) onVinculado()
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(vFondo),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(60.dp),
-            horizontalArrangement = Arrangement.spacedBy(48.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(18.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Icon(Icons.Default.Tv, null, tint = vRojo, modifier = Modifier.size(42.dp))
-                    Text("compasos tv", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = vTexto)
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                Text(
-                    "para vincular esta pantalla:",
-                    fontSize = 18.sp,
-                    color = vTexto,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                PasoVinculacion("1", "abre la app compasos en tu teléfono")
-                PasoVinculacion("2", "ve a dispositivos → vincular pantalla tv")
-                PasoVinculacion("3", "selecciona el recuadro azul para ingresar el código")
-
-                Spacer(Modifier.height(16.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(Icons.Default.Wifi, null, tint = vSecund, modifier = Modifier.size(16.dp))
-                    Text(
-                        "modelo: ${Build.MODEL}  ·  id: tv_$tvId",
-                        fontSize = 12.sp,
-                        color = vSecund
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .width(420.dp)
-                    .background(vPanel, RoundedCornerShape(24.dp))
-                    .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
-                    .padding(horizontal = 44.dp, vertical = 48.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(20.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    when (val e = estado) {
-                        is EstadoVinculacion.Ingresando -> {
-                            Text("código del teléfono", fontSize = 15.sp, color = vSecund)
-
-                            Surface(
-                                onClick = { mostrarDialogoCodigo = true },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(72.dp),
-                                shape = ClickableSurfaceDefaults.shape(
-                                    shape = RoundedCornerShape(12.dp)
-                                ),
-                                colors = ClickableSurfaceDefaults.colors(
-                                    containerColor = vFondo,
-                                    focusedContainerColor = vAzul.copy(alpha = 0.3f)
-                                )
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                        .padding(16.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (codigoIngresado.isEmpty()) {
-                                        Text(
-                                            "presiona enter para ingresar",
-                                            fontSize = 18.sp,
-                                            color = vSecund,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    } else {
-                                        Text(
-                                            codigoIngresado.chunked(3).joinToString("  "),
-                                            fontSize = 36.sp,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = Color.White,
-                                            letterSpacing = 4.sp,
-                                            textAlign = TextAlign.Center
-                                        )
-                                    }
-                                }
-                            }
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Button(
-                                    onClick = {
-                                        if (codigoIngresado.length >= 4) {
-                                            vm.confirmarCodigo(codigoIngresado)
-                                        }
-                                    },
-                                    enabled = codigoIngresado.length >= 4,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("vincular", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                }
-
-                                Button(
-                                    onClick = { codigoIngresado = "" },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("limpiar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-
-                        is EstadoVinculacion.Esperando -> {
-                            CircularProgressIndicator(color = vAzul, modifier = Modifier.size(52.dp))
-
-                            Text(
-                                codigoIngresado.chunked(3).joinToString("  "),
-                                fontSize = 40.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color.White,
-                                letterSpacing = 3.sp
-                            )
-
-                            PuntosAnimados()
-
-                            Text(
-                                "esperando confirmación del teléfono...",
-                                fontSize = 13.sp,
-                                color = vSecund,
-                                textAlign = TextAlign.Center
-                            )
-
-                            Button(onClick = { vm.reintentar() }) {
-                                Text("cambiar código", fontSize = 14.sp)
-                            }
-                        }
-
-                        is EstadoVinculacion.Error -> {
-                            Text("sin conexión", fontSize = 16.sp, color = vRojo)
-                            Text(e.mensaje, fontSize = 12.sp, color = vSecund, textAlign = TextAlign.Center)
-                            Button(onClick = { vm.reintentar() }) {
-                                Text("reintentar", fontSize = 16.sp)
-                            }
-                        }
-                    }
-
-                    Text(
-                        "el código lo genera la app en tu teléfono",
-                        fontSize = 11.sp,
-                        color = vSecund.copy(alpha = 0.5f)
-                    )
-                }
-            }
-        }
-    }
-
-    if (mostrarDialogoCodigo) {
-        DialogCodigo(
-            codigo = codigoIngresado,
-            onCodigoChange = { nuevo ->
-                if (nuevo.length <= 6) {
-                    codigoIngresado = nuevo.uppercase()
-                }
-            },
-            onConfirmar = {
-                mostrarDialogoCodigo = false
-                focusManager.clearFocus()
-                if (codigoIngresado.length >= 4) {
-                    vm.confirmarCodigo(codigoIngresado)
-                }
-            },
-            onCancelar = {
-                mostrarDialogoCodigo = false
-                focusManager.clearFocus()
-            },
-            onLimpiar = {
-                codigoIngresado = ""
-            }
+object CategoriasVideoSeguridad {
+    val TODAS = listOf(
+        CategoriaVideo(
+            clave = "prevencion",
+            titulo = "Prevención de secuestro",
+            consultaBusqueda = "prevención de secuestro consejos de seguridad familiar"
+        ),
+        CategoriaVideo(
+            clave = "que_hacer",
+            titulo = "Qué hacer en una emergencia",
+            consultaBusqueda = "qué hacer en caso de secuestro cómo actuar seguridad"
+        ),
+        CategoriaVideo(
+            clave = "ninos",
+            titulo = "Seguridad para niños",
+            consultaBusqueda = "seguridad infantil prevención secuestro niños consejos para padres"
+        ),
+        CategoriaVideo(
+            clave = "entorno",
+            titulo = "Rutas y entornos seguros",
+            consultaBusqueda = "cómo identificar rutas seguras seguridad personal en la calle"
+        ),
+        CategoriaVideo(
+            clave = "autoproteccion",
+            titulo = "Señales de alerta",
+            consultaBusqueda = "señales de alerta autoprotección seguridad personal consejos"
         )
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
-@Composable
-private fun DialogCodigo(
-    codigo: String,
-    onCodigoChange: (String) -> Unit,
-    onConfirmar: () -> Unit,
-    onCancelar: () -> Unit,
-    onLimpiar: () -> Unit
-) {
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
-
-    LaunchedEffect(Unit) {
-        delay(300)
-        focusRequester.requestFocus()
-        keyboardController?.show()
-    }
-
-    Dialog(
-        onDismissRequest = onCancelar,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.7f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                modifier = Modifier
-                    .width(500.dp)
-                    .background(vPanel, RoundedCornerShape(24.dp))
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(20.dp)
-            ) {
-                Text(
-                    "ingresa el código",
-                    fontSize = 20.sp,
-                    color = vTexto,
-                    fontWeight = FontWeight.Bold
-                )
-
-                OutlinedTextField(
-                    value = codigo,
-                    onValueChange = onCodigoChange,
-                    singleLine = true,
-                    textStyle = TextStyle(
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontFamily = FontFamily.Monospace,
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                        letterSpacing = 4.sp
-                    ),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Done
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            if (codigo.length >= 4) {
-                                onConfirmar()
-                            }
-                        }
-                    ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = vFondo,
-                        unfocusedContainerColor = vFondo,
-                        focusedBorderColor = vAzul,
-                        unfocusedBorderColor = vAzul.copy(alpha = 0.4f),
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        cursorColor = vAzul
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester)
-                )
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Button(
-                        onClick = onCancelar,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("cancelar", fontSize = 16.sp)
-                    }
-
-                    Button(
-                        onClick = onLimpiar,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("limpiar", fontSize = 16.sp)
-                    }
-
-                    Button(
-                        onClick = onConfirmar,
-                        enabled = codigo.length >= 4,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("aceptar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun PasoVinculacion(numero: String, texto: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .background(vAzul, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(numero, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        }
-        Text(texto, fontSize = 15.sp, color = Color(0xFF9E9E9E))
-    }
-}
-
-@Composable
-private fun PuntosAnimados() {
-    var puntos by remember { mutableStateOf(1) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(600)
-            puntos = if (puntos >= 3) 1 else puntos + 1
-        }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        repeat(3) { i ->
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(if (i < puntos) vAzul else vAzul.copy(alpha = 0.25f))
-            )
-        }
-    }
+    )
 }
 </file>
 
@@ -2592,24 +2288,6 @@ val Typography = Typography(
 )
 </file>
 
-<file path="app/src/main/java/com/example/compasos_tv/MainActivity.kt">
-package com.example.compasos_tv
-
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import com.example.compasos_tv.Navigation.TvNavigation
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            TvNavigation()
-        }
-    }
-}
-</file>
-
 <file path="app/src/main/keepRules/rules.keep">
 # Add project specific R8 rules here.
 # AGP will combine all keep rule files in src/main/keepRules to pass to R8
@@ -2625,13 +2303,6 @@ class MainActivity : ComponentActivity() {
 #}
 </file>
 
-<file path="app/src/main/res/values/developer-config.xml">
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="mapbox_access_token" translatable="false">pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ</string>
-</resources>
-</file>
-
 <file path="app/src/main/res/values/strings.xml">
 <resources>
     <string name="app_name">CompaSOS_TV</string>
@@ -2645,131 +2316,8 @@ class MainActivity : ComponentActivity() {
 </resources>
 </file>
 
-<file path="app/src/main/AndroidManifest.xml">
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
-    <uses-feature
-        android:name="android.hardware.touchscreen"
-        android:required="false" />
-    <uses-feature
-        android:name="android.software.leanback"
-        android:required="true" />
-
-    <application
-        android:allowBackup="true"
-        android:banner="@mipmap/ic_launcher"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.CompaSOS_TV">
-
-        <service
-            android:name=".services.TvMqttService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:configChanges="keyboard|keyboardHidden|navigation">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-    </application>
-
-</manifest>
-</file>
-
 <file path="app/.gitignore">
 /build
-</file>
-
-<file path="app/build.gradle.kts">
-plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.compose)
-    id("com.google.devtools.ksp")
-
-
-}
-
-android {
-    namespace = "com.example.compasos_tv"
-    compileSdk {
-        version = release(37)
-    }
-
-    defaultConfig {
-        applicationId = "com.example.compasos_tv"
-        minSdk = 36
-        targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
-
-    }
-
-    buildTypes {
-        release {
-            optimization {
-                enable = false
-            }
-        }
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
-    buildFeatures {
-        compose = true
-    }
-}
-
-dependencies {
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
-
-    implementation("androidx.tv:tv-material:1.0.0")
-    implementation("androidx.tv:tv-foundation:1.0.0")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.compose.material:material-icons-extended:1.6.7")
-
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.appcompat)
-
-    debugImplementation(libs.androidx.compose.ui.tooling)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-
-    implementation("androidx.room:room-runtime:2.7.2")
-    implementation("androidx.room:room-ktx:2.7.2")
-    ksp("androidx.room:room-compiler:2.7.2")
-
-    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
-    implementation("org.eclipse.paho:org.eclipse.paho.android.service:1.1.1")
-    implementation("com.mapbox.maps:android:11.8.0")
-    implementation("com.mapbox.extension:maps-compose:11.8.0")
-
-
-
-}
 </file>
 
 <file path="gradle/wrapper/gradle-wrapper.properties">
@@ -3288,6 +2836,1010 @@ dependencyResolutionManagement {
 
 rootProject.name = "CompaSOS_TV"
 include(":app")
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/config/MqttConfig.kt">
+package com.example.compasos_tv.config
+
+
+object MqttConfig {
+    const val BROKER_URL       = "tcp://192.168.1.5:1883"
+    const val TIMEOUT_CONEXION = 10
+    const val KEEP_ALIVE       = 60
+    const val QOS              = 1
+
+    // Topics TV ← teléfono
+    const val TOPIC_TV          = "compasos/tv"          // compasos/tv/{tvId}/sesion|alerta|ubicacion
+    const val TOPIC_VINCULACION = "compasos/vinculacion"  // compasos/vinculacion/tv/{tvId}/...
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/data/entitys/AppDatabaseTv.kt">
+package com.example.compasos_tv.data.entitys
+
+import android.content.Context
+import androidx.room.*
+import com.example.compasos_tv.data.entitys.dao.VideoTvDao
+
+@Database(
+    entities = [
+        AlertaTvEntity::class,
+        FamiliarTvEntity::class,
+        ConfigTvEntity::class,
+        VideoTvEntity::class
+
+    ],
+    version = 2,
+    exportSchema = false
+)
+abstract class AppDatabaseTv : RoomDatabase() {
+
+    abstract fun alertaTvDao():   AlertaTvDao
+    abstract fun familiarTvDao(): FamiliarTvDao
+    abstract fun configTvDao():   ConfigTvDao
+    abstract fun videoTvDao(): VideoTvDao
+
+
+    companion object {
+        @Volatile private var INSTANCE: AppDatabaseTv? = null
+
+        fun getInstance(context: Context): AppDatabaseTv =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabaseTv::class.java,
+                    "compasos_tv.db"
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
+            }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvNavigation.kt">
+package com.example.compasos_tv.Navigation
+
+import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.example.compasos_tv.Screan.*
+@Composable
+fun TvNavigation() {
+    val navController = rememberNavController()
+
+    NavHost(
+        navController    = navController,
+        startDestination = TvScreen.Vinculacion.route
+    ) {
+        // ── Vinculación — siempre es el punto de entrada ──────────────────────
+        // La propia pantalla redirige al Dashboard si ya estaba vinculado
+        composable(TvScreen.Vinculacion.route) {
+            VinculacionScreen(
+                onVinculado = {
+                    navController.navigate(TvScreen.Dashboard.route) {
+                        popUpTo(TvScreen.Vinculacion.route) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        // ── Dashboard — mapa sin padding para que ocupe todo el área ──────────
+        composable(TvScreen.Dashboard.route) {
+            TvMainScreen(
+                navController    = navController,
+                rutaSeleccionada = TvScreen.Dashboard.route,
+                padContent       = false          // el mapa ocupa todo el espacio
+            ) {
+                TvDashboardScreen()
+            }
+        }
+
+        composable(TvScreen.AlertasRecibidas.route) {
+            TvMainScreen(navController, TvScreen.AlertasRecibidas.route) {
+                TvAlertasScreen()
+            }
+        }
+
+        composable(TvScreen.FamiliaEnLinea.route) {
+            TvMainScreen(navController, TvScreen.FamiliaEnLinea.route) {
+                TvFamiliaScreen()
+            }
+        }
+
+        composable(TvScreen.Configuracion.route) {
+            TvMainScreen(navController, TvScreen.Configuracion.route) {
+                TvConfiguracionScreen(
+                    onDesvincular = {
+                        navController.navigate(TvScreen.Vinculacion.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                )
+            }
+        }
+
+        composable(TvScreen.Videos.route) {
+            TvMainScreen(navController, TvScreen.Videos.route) {
+                TvVideosScreen()
+            }
+        }
+
+    }
+    }
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Navigation/TvScreen.kt">
+package com.example.compasos_tv.Navigation
+
+sealed class TvScreen(val route: String, val titulo: String) {
+    object Vinculacion      : TvScreen("tv_vinculacion",        "Vincular")
+    object Dashboard        : TvScreen("tv_dashboard",          "Inicio")
+    object AlertasRecibidas : TvScreen("tv_alertas_recibidas",  "Alertas")
+    object FamiliaEnLinea   : TvScreen("tv_familia",            "Familia")
+    object Configuracion    : TvScreen("tv_configuracion",      "Configuración")
+
+    object Videos : TvScreen("tv_videos", "videos")
+
+
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/TvMainScreen.kt">
+package com.example.compasos_tv.Screan
+
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.navigation.NavController
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Text
+import com.example.compasos_tv.Navigation.TvScreen
+
+data class TvNavItem(val pantalla: TvScreen, val icono: ImageVector)
+
+private val itemsNav = listOf(
+    TvNavItem(TvScreen.Dashboard,        Icons.Filled.Home),
+    TvNavItem(TvScreen.AlertasRecibidas, Icons.Filled.Notifications),
+    TvNavItem(TvScreen.FamiliaEnLinea,   Icons.Filled.Face),
+    TvNavItem(TvScreen.Configuracion,    Icons.Filled.Settings),
+    TvNavItem(TvScreen.Videos,           Icons.Filled.VideoLibrary),
+
+    )
+
+private val ColorFondo        = Color(0xFF0A0E1A)
+private val ColorBarra        = Color(0xFF0F1629)
+private val ColorSeleccionado = Color(0xFF1565C0)
+private val ColorFocused      = Color(0xFF1976D2)
+private val ColorTexto        = Color(0xFFE0E0E0)
+private val ColorTextoSecund  = Color(0xFF9E9E9E)
+private val ColorRojo         = Color(0xFFE53935)
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvMainScreen(
+    navController:    NavController,
+    rutaSeleccionada: String,
+    padContent:       Boolean = true,          // ← nuevo parámetro
+    contenido:        @Composable () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ColorFondo)
+    ) {
+        // ── Barra lateral ─────────────────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .width(220.dp)
+                .fillMaxHeight()
+                .background(ColorBarra)
+                .padding(vertical = 24.dp, horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier          = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector        = Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint               = ColorRojo,
+                    modifier           = Modifier.size(28.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text       = "CompaSOS",
+                    color      = ColorTexto,
+                    fontSize   = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            itemsNav.forEach { item ->
+                TvNavItemRow(
+                    item         = item,
+                    seleccionado = rutaSeleccionada == item.pantalla.route,
+                    onClick      = {
+                        if (rutaSeleccionada != item.pantalla.route) {
+                            navController.navigate(item.pantalla.route) {
+                                popUpTo(TvScreen.Dashboard.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState    = true
+                            }
+                        }
+                    }
+                )
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            Text(
+                text     = "TV v1.0",
+                color    = ColorTextoSecund,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(Color.White.copy(alpha = 0.06f))
+        )
+
+        // ── Área de contenido (con o sin padding según pantalla) ──────────────
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (padContent) Modifier.padding(32.dp) else Modifier)
+        ) {
+            contenido()
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvNavItemRow(
+    item:         TvNavItem,
+    seleccionado: Boolean,
+    onClick:      () -> Unit
+) {
+    var tieneFoco by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+
+    val colorFondo by animateColorAsState(
+        targetValue = when {
+            seleccionado -> ColorSeleccionado
+            tieneFoco    -> ColorFocused.copy(alpha = 0.4f)
+            else         -> Color.Transparent
+        },
+        animationSpec = tween(150),
+        label         = "nav_color"
+    )
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colorFondo)
+            .focusRequester(focusRequester)
+            .onFocusChanged { tieneFoco = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) { onClick(); true } else false
+            }
+            .focusable()
+            .padding(horizontal = 12.dp, vertical = 14.dp)
+    ) {
+        Icon(
+            imageVector        = item.icono,
+            contentDescription = null,
+            tint               = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
+            modifier           = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text       = item.pantalla.titulo,
+            color      = if (seleccionado || tieneFoco) Color.White else ColorTextoSecund,
+            fontSize   = 14.sp,
+            fontWeight = if (seleccionado) FontWeight.SemiBold else FontWeight.Normal
+        )
+        if (seleccionado) {
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.White)
+            )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/Screan/VinculacionScreen.kt">
+package com.example.compasos_tv.Screan
+
+import android.app.Application
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.tv.material3.Button
+import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Surface
+import androidx.tv.material3.Text
+import com.example.compasos_tv.data.entitys.AppDatabaseTv
+import com.example.compasos_tv.services.VinculacionTvRepository
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+private val vFondo  = Color(0xFF0A0E1A)
+private val vPanel  = Color(0xFF0F1629)
+private val vTexto  = Color(0xFFE0E0E0)
+private val vSecund = Color(0xFF9E9E9E)
+private val vAzul   = Color(0xFF1565C0)
+private val vRojo   = Color(0xFFE53935)
+
+sealed class EstadoVinculacion {
+    object Ingresando                   : EstadoVinculacion()
+    object Esperando                    : EstadoVinculacion()
+    data class Error(val mensaje: String) : EstadoVinculacion()
+}
+
+class VinculacionTvViewModel(app: Application) : AndroidViewModel(app) {
+    private val repo = VinculacionTvRepository(app)
+    val config       = repo.observarConfig()
+
+    private val _estado = MutableStateFlow<EstadoVinculacion>(EstadoVinculacion.Ingresando)
+    val estado: StateFlow<EstadoVinculacion> = _estado.asStateFlow()
+
+    fun confirmarCodigo(codigo: String) {
+        if (codigo.isBlank()) return
+        viewModelScope.launch {
+            _estado.value = EstadoVinculacion.Esperando
+            try {
+                repo.solicitarVinculacion(codigo) { _, _, _ -> }
+            } catch (e: Exception) {
+                _estado.value = EstadoVinculacion.Error(e.message ?: "Sin conexión al broker MQTT")
+            }
+        }
+    }
+
+    fun reintentar() {
+        _estado.value = EstadoVinculacion.Ingresando
+    }
+
+    class Factory(private val app: Application) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+            VinculacionTvViewModel(app) as T
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+fun VinculacionScreen(onVinculado: () -> Unit) {
+    val context = LocalContext.current
+    val vm: VinculacionTvViewModel = viewModel(
+        factory = VinculacionTvViewModel.Factory(context.applicationContext as Application)
+    )
+    val config by vm.config.collectAsState(initial = null)
+    val estado by vm.estado.collectAsState()
+    val tvId = remember {
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }
+
+    var codigoIngresado by remember { mutableStateOf("") }
+    var mostrarDialogoCodigo by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+
+    LaunchedEffect(Unit) {
+        val cfg = AppDatabaseTv.getInstance(context).configTvDao().obtener()
+        if (cfg?.vinculado == true) onVinculado()
+    }
+
+    LaunchedEffect(config) {
+        if (config?.vinculado == true) onVinculado()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(vFondo),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(60.dp),
+            horizontalArrangement = Arrangement.spacedBy(48.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Icon(Icons.Default.Tv, null, tint = vRojo, modifier = Modifier.size(42.dp))
+                    Text("compasos tv", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = vTexto)
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "para vincular esta pantalla:",
+                    fontSize = 18.sp,
+                    color = vTexto,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                PasoVinculacion("1", "abre la app compasos en tu teléfono")
+                PasoVinculacion("2", "ve a dispositivos → vincular pantalla tv")
+                PasoVinculacion("3", "selecciona el recuadro azul para ingresar el código")
+
+                Spacer(Modifier.height(16.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Wifi, null, tint = vSecund, modifier = Modifier.size(16.dp))
+                    Text(
+                        "modelo: ${Build.MODEL}  ·  id: tv_$tvId",
+                        fontSize = 12.sp,
+                        color = vSecund
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .width(420.dp)
+                    .background(vPanel, RoundedCornerShape(24.dp))
+                    .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
+                    .padding(horizontal = 44.dp, vertical = 48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    when (val e = estado) {
+                        is EstadoVinculacion.Ingresando -> {
+                            Text("código del teléfono", fontSize = 15.sp, color = vSecund)
+
+                            Surface(
+                                onClick = { mostrarDialogoCodigo = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(72.dp),
+                                shape = ClickableSurfaceDefaults.shape(
+                                    shape = RoundedCornerShape(12.dp)
+                                ),
+                                colors = ClickableSurfaceDefaults.colors(
+                                    containerColor = vFondo,
+                                    focusedContainerColor = vAzul.copy(alpha = 0.3f)
+                                )
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .border(2.dp, vAzul.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                        .padding(16.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (codigoIngresado.isEmpty()) {
+                                        Text(
+                                            "presiona enter para ingresar",
+                                            fontSize = 18.sp,
+                                            color = vSecund,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    } else {
+                                        Text(
+                                            codigoIngresado.chunked(3).joinToString("  "),
+                                            fontSize = 36.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = Color.White,
+                                            letterSpacing = 4.sp,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Button(
+                                    onClick = {
+                                        if (codigoIngresado.length >= 4) {
+                                            vm.confirmarCodigo(codigoIngresado)
+                                        }
+                                    },
+                                    enabled = codigoIngresado.length >= 4,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("vincular", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                Button(
+                                    onClick = { codigoIngresado = "" },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("limpiar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        is EstadoVinculacion.Esperando -> {
+                            CircularProgressIndicator(color = vAzul, modifier = Modifier.size(52.dp))
+
+                            Text(
+                                codigoIngresado.chunked(3).joinToString("  "),
+                                fontSize = 40.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White,
+                                letterSpacing = 3.sp
+                            )
+
+                            PuntosAnimados()
+
+                            Text(
+                                "esperando confirmación del teléfono...",
+                                fontSize = 13.sp,
+                                color = vSecund,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Button(onClick = { vm.reintentar() }) {
+                                Text("cambiar código", fontSize = 14.sp)
+                            }
+                        }
+
+                        is EstadoVinculacion.Error -> {
+                            Text("sin conexión", fontSize = 16.sp, color = vRojo)
+                            Text(e.mensaje, fontSize = 12.sp, color = vSecund, textAlign = TextAlign.Center)
+                            Button(onClick = { vm.reintentar() }) {
+                                Text("reintentar", fontSize = 16.sp)
+                            }
+                        }
+                    }
+
+                    Text(
+                        "el código lo genera la app en tu teléfono",
+                        fontSize = 11.sp,
+                        color = vSecund.copy(alpha = 0.5f)
+                    )
+                }
+            }
+        }
+    }
+
+    if (mostrarDialogoCodigo) {
+        DialogCodigo(
+            codigo = codigoIngresado,
+            onCodigoChange = { nuevo ->
+                if (nuevo.length <= 6) {
+                    codigoIngresado = nuevo.uppercase()
+                }
+            },
+            onConfirmar = {
+                mostrarDialogoCodigo = false
+                focusManager.clearFocus()
+                if (codigoIngresado.length >= 4) {
+                    vm.confirmarCodigo(codigoIngresado)
+                }
+            },
+            onCancelar = {
+                mostrarDialogoCodigo = false
+                focusManager.clearFocus()
+            },
+            onLimpiar = {
+                codigoIngresado = ""
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun DialogCodigo(
+    codigo: String,
+    onCodigoChange: (String) -> Unit,
+    onConfirmar: () -> Unit,
+    onCancelar: () -> Unit,
+    onLimpiar: () -> Unit
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        delay(300)
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    Dialog(
+        onDismissRequest = onCancelar,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.7f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(500.dp)
+                    .background(vPanel, RoundedCornerShape(24.dp))
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
+                Text(
+                    "ingresa el código",
+                    fontSize = 20.sp,
+                    color = vTexto,
+                    fontWeight = FontWeight.Bold
+                )
+
+                OutlinedTextField(
+                    value = codigo,
+                    onValueChange = onCodigoChange,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        letterSpacing = 4.sp
+                    ),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            if (codigo.length >= 4) {
+                                onConfirmar()
+                            }
+                        }
+                    ),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = vFondo,
+                        unfocusedContainerColor = vFondo,
+                        focusedBorderColor = vAzul,
+                        unfocusedBorderColor = vAzul.copy(alpha = 0.4f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = vAzul
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = onCancelar,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("cancelar", fontSize = 16.sp)
+                    }
+
+                    Button(
+                        onClick = onLimpiar,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("limpiar", fontSize = 16.sp)
+                    }
+
+                    Button(
+                        onClick = onConfirmar,
+                        enabled = codigo.length >= 4,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("aceptar", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun PasoVinculacion(numero: String, texto: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .background(vAzul, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(numero, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+        Text(texto, fontSize = 15.sp, color = Color(0xFF9E9E9E))
+    }
+}
+
+@Composable
+private fun PuntosAnimados() {
+    var puntos by remember { mutableStateOf(1) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(600)
+            puntos = if (puntos >= 3) 1 else puntos + 1
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        repeat(3) { i ->
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(if (i < puntos) vAzul else vAzul.copy(alpha = 0.25f))
+            )
+        }
+    }
+}
+</file>
+
+<file path="app/src/main/java/com/example/compasos_tv/MainActivity.kt">
+package com.example.compasos_tv
+
+import android.os.Bundle
+import android.view.KeyEvent
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import com.example.compasos_tv.Navigation.TvNavigation
+import com.example.compasos_tv.Screan.ManejadorTeclasReproductor
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            TvNavigation()
+        }
+    }
+
+    @Suppress("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val manejado = ManejadorTeclasReproductor.actual?.invoke(event) ?: false
+        return manejado || super.dispatchKeyEvent(event)
+    }
+}
+</file>
+
+<file path="app/src/main/res/values/developer-config.xml">
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mapbox_access_token" translatable="false">pk.eyJ1IjoiYW5keXNzMTIiLCJhIjoiY21zbHVtYmJkMTh6YTJ4b29zb25pcjMzOSJ9.388hSDi65h3MrNr5v-rSgQ</string>
+    <string name="youtube_api_key" translatable="false">AIzaSyARAam8FzM6vA7KW2Jqw2yKcGjpvU0J4NE</string>
+</resources>
+</file>
+
+<file path="app/src/main/AndroidManifest.xml">
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:banner="@mipmap/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CompaSOS_TV">
+
+        <service
+            android:name=".services.TvMqttService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>
+</file>
+
+<file path="app/build.gradle.kts">
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+    id("com.google.devtools.ksp")
+
+
+}
+
+android {
+    namespace = "com.example.compasos_tv"
+    compileSdk {
+        version = release(37)
+    }
+
+    defaultConfig {
+        applicationId = "com.example.compasos_tv"
+        minSdk = 26
+        targetSdk = 37
+        versionCode = 1
+        versionName = "1.0"
+
+    }
+
+    buildTypes {
+        release {
+            optimization {
+                enable = false
+            }
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        compose = true
+    }
+}
+
+dependencies {
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+
+    implementation("androidx.tv:tv-material:1.0.0")
+    implementation("androidx.tv:tv-foundation:1.0.0")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("androidx.compose.material:material-icons-extended:1.6.7")
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
+
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+
+    implementation("androidx.room:room-runtime:2.7.2")
+    implementation("androidx.room:room-ktx:2.7.2")
+    ksp("androidx.room:room-compiler:2.7.2")
+
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    implementation("org.eclipse.paho:org.eclipse.paho.android.service:1.1.1")
+    implementation("com.mapbox.maps:android:11.8.0")
+    implementation("com.mapbox.extension:maps-compose:11.8.0")
+
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
+
+
+}
 </file>
 
 </files>

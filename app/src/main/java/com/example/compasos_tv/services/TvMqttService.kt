@@ -13,21 +13,76 @@ import com.example.compasos_tv.config.MqttManager
 import com.example.compasos_tv.data.entitys.AlertaTvEntity
 import com.example.compasos_tv.data.entitys.AppDatabaseTv
 import com.example.compasos_tv.data.entitys.FamiliarTvEntity
+import com.example.compasos_tv.data.entitys.NotificacionTvEntity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * Estado vivo de la conexión, para que la UI distinga tres situaciones que se
+ * ven igual si no las separas:
+ *   a) sin broker            → "Sin conexión al servidor"
+ *   b) broker pero sin móvil → "Esperando al teléfono…"
+ *   c) todo bien, sin datos  → "Conectado, esperando familiares…"
+ */
+object EstadoTv {
+    private val _conectadoBroker = MutableStateFlow(false)
+    val conectadoBroker = _conectadoBroker.asStateFlow()
+
+    private val _telefonoEnLinea = MutableStateFlow(false)
+    val telefonoEnLinea = _telefonoEnLinea.asStateFlow()
+
+    private val _ultimoMensaje = MutableStateFlow(0L)
+    val ultimoMensaje = _ultimoMensaje.asStateFlow()
+
+    private val _ultimoError = MutableStateFlow<String?>(null)
+    val ultimoError = _ultimoError.asStateFlow()
+
+    fun setBroker(v: Boolean)   { _conectadoBroker.value = v }
+    fun setTelefono(v: Boolean) { _telefonoEnLinea.value = v }
+    fun latido()                { _ultimoMensaje.value = System.currentTimeMillis() }
+    fun setError(m: String?)    { _ultimoError.value = m }
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  LA PANTALLA ESPERANDO DATOS DEL TELÉFONO
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Cambios respecto a tu versión, y qué resolvía cada uno:
+ *
+ * 1. Usa MqttManager.instancia — UNA sola conexión compartida con
+ *    VinculacionTvRepository. Antes eran dos, y la confirmación de vinculación
+ *    caía en la que nadie escuchaba.
+ *
+ * 2. procesarRespuestaVinculacion() YA SE LLAMA. En tu código estaba escrita
+ *    pero ninguna suscripción la invocaba: era código muerto.
+ *
+ * 3. Suscripción con wildcard `compasos/tv/{tvId}/#` y despacho por sufijo,
+ *    en vez de tres suscripciones sueltas. Así llega también /notificacion.
+ *
+ * 4. Bucle de reintento con backoff. Antes, si el broker no estaba arriba al
+ *    encender la TV, el catch se comía la excepción y la pantalla quedaba
+ *    muerta hasta reiniciar la app.
+ *
+ * 5. guardarConservandoUbicacion() en vez de insertar(), para no borrar la
+ *    ubicación en cada snapshot.
+ */
 class TvMqttService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val mqtt  = MqttManager()
+    private val mqtt  = MqttManager.instancia
     private lateinit var db: AppDatabaseTv
     private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
 
     companion object {
-        private const val CANAL    = "compasos_tv_svc"
-        private const val NOTIF_ID = 8001
+        private const val TAG       = "TvMqttSvc"
+        private const val CANAL     = "compasos_tv_svc"
+        private const val CANAL_SOS = "compasos_tv_sos"
+        private const val NOTIF_ID  = 8001
 
         fun iniciar(context: Context) {
             val intent = Intent(context, TvMqttService::class.java)
@@ -49,16 +104,20 @@ class TvMqttService : Service() {
     override fun onCreate() {
         super.onCreate()
         db = AppDatabaseTv.getInstance(applicationContext)
-        crearCanal()
+        crearCanales()
         startForeground(NOTIF_ID, notif())
         conectarYSuscribir()
+        vigilarPresenciaTelefono()
     }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         scope.cancel()
         mqtt.desconectar()
+        EstadoTv.setBroker(false)
         super.onDestroy()
     }
 
@@ -66,46 +125,93 @@ class TvMqttService : Service() {
 
     private fun conectarYSuscribir() {
         scope.launch {
-            try {
-                mqtt.conectar()
-                val tvId = obtenerTvId(applicationContext)
+            val tvId = obtenerTvId(applicationContext)
 
-                // Sesión + perfil del usuario vinculado
-                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/sesion") { _, payload ->
-                    scope.launch { procesarSesion(payload) }
+            mqtt.alConectar { reconectado ->
+                EstadoTv.setBroker(true)
+                EstadoTv.setError(null)
+                scope.launch {
+                    mqtt.publicarSeguro(
+                        MqttConfig.topicEstadoTv(tvId),
+                        JSONObject().put("online", true)
+                            .put("ts", System.currentTimeMillis()).toString(),
+                        retained = true
+                    )
                 }
-
-                // Alerta recibida desde el teléfono
-                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/alerta") { _, payload ->
-                    scope.launch { procesarAlerta(payload) }
-                }
-
-                // Ubicación en vivo de familiares
-                mqtt.suscribir("${MqttConfig.TOPIC_TV}/$tvId/ubicacion") { _, payload ->
-                    scope.launch { procesarUbicacion(payload) }
-                }
-
-
-
-                Log.d("TvMqttSvc", "✅ Suscrito a topics de TV: $tvId")
-
-            } catch (e: Exception) {
-                Log.e("TvMqttSvc", "Error MQTT: ${e.message}")
+                if (reconectado) Log.d(TAG, "Reconectado — suscripciones restauradas")
             }
+
+            var intentos = 0
+            while (isActive) {
+                try {
+                    mqtt.conectar(
+                        clientId   = "compasos_${tvId.take(24)}",
+                        lwtTopic   = MqttConfig.topicEstadoTv(tvId),
+                        lwtPayload = JSONObject().put("online", false).toString()
+                    )
+
+                    // UNA suscripción para todo lo de esta TV
+                    mqtt.suscribir(MqttConfig.topicTodoDeEstaTv(tvId)) { topic, payload ->
+                        EstadoTv.latido()
+                        scope.launch { despachar(topic, payload) }
+                    }
+
+                    // Respuesta de vinculación, si ya hay un código guardado.
+                    // Esto es lo que faltaba para que procesarRespuestaVinculacion()
+                    // sirviera de algo.
+                    db.configTvDao().obtener()?.codigoVinculacion
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { cod ->
+                            mqtt.suscribir(MqttConfig.topicRespuesta(cod)) { _, payload ->
+                                scope.launch { procesarRespuestaVinculacion(payload) }
+                            }
+                        }
+
+                    EstadoTv.setBroker(true)
+                    Log.d(TAG, "✅ Suscrito a topics de TV: $tvId")
+                    return@launch
+
+                } catch (e: Exception) {
+                    intentos++
+                    EstadoTv.setBroker(false)
+                    EstadoTv.setError("No se pudo conectar al servidor (${e.message})")
+                    Log.e(TAG, "Error MQTT (intento $intentos): ${e.message}")
+                    delay(minOf(5_000L * intentos, 30_000L))   // backoff hasta 30 s
+                }
+            }
+        }
+    }
+
+    /** Reparte el mensaje según el tramo del topic después del tvId. */
+    private suspend fun despachar(topic: String, payload: String) {
+        // compasos/tv/{tvId}/sesion
+        // compasos/tv/{tvId}/ubicacion/{usuarioId}
+        // compasos/tv/{tvId}/alerta
+        // compasos/tv/{tvId}/notificacion
+        // compasos/tv/{tvId}/telefono_estado
+        // compasos/tv/{tvId}/estado          ← el nuestro, se ignora
+        val sub = topic.split("/").getOrNull(3) ?: return
+
+        when (sub) {
+            "sesion"          -> procesarSesion(payload)
+            "ubicacion"       -> procesarUbicacion(payload)
+            "alerta"          -> procesarAlerta(payload)
+            "notificacion"    -> procesarNotificacion(payload)
+            "telefono_estado" -> procesarEstadoTelefono(payload)
+            "estado"          -> { /* nuestro propio retained */ }
+            else              -> Log.d(TAG, "Subtopic no manejado: $sub")
         }
     }
 
     // ── Procesadores ──────────────────────────────────────────────────────────
 
-    /** Sesión: usuario + lista de familiares que manda el teléfono */
+    /** Sesión: usuario + lista de familiares con ubicación */
     private suspend fun procesarSesion(payloadJson: String) {
         try {
-            val json      = JSONObject(payloadJson)
-            val usuarioId = json.optString("usuarioId")
-            val nombre    = json.optString("nombre")
-            val email     = json.optString("email")
+            val json   = JSONObject(payloadJson)
+            val nombre = json.optString("nombre")
+            val email  = json.optString("email")
 
-            // Actualizar config con datos del usuario vinculado
             val config = db.configTvDao().obtener()
             if (config != null && config.vinculado) {
                 db.configTvDao().guardar(
@@ -117,25 +223,30 @@ class TvMqttService : Service() {
                 )
             }
 
-            // Actualizar familiares
             val familiaresArray = json.optJSONArray("familiares") ?: return
             for (i in 0 until familiaresArray.length()) {
-                val f = familiaresArray.getJSONObject(i)
-                db.familiarTvDao().insertar(
+                val f  = familiaresArray.getJSONObject(i)
+                val id = f.optString("usuarioId")
+                if (id.isBlank()) continue
+
+                // ⚠️ guardarConservandoUbicacion, NO insertar():
+                // insertar() con REPLACE borraba la ubicación en cada snapshot.
+                db.familiarTvDao().guardarConservandoUbicacion(
                     FamiliarTvEntity(
-                        usuarioId = f.optString("usuarioId"),
-                        nombre = f.optString("nombre"),
-                        apellido = f.optString("apellido"),
-                        latitud = f.optDouble("latitud").takeIf { !it.isNaN() },
-                        longitud = f.optDouble("longitud").takeIf { !it.isNaN() },
-                        ultimaUbicacionFecha = f.optString("fecha"),
-                        enLinea = f.optBoolean("enLinea", true)
+                        usuarioId            = id,
+                        nombre               = f.optString("nombre").ifBlank { "Familiar" },
+                        apellido             = f.optString("apellido").ifBlank { null },
+                        latitud              = f.optDouble("latitud").takeIf { !it.isNaN() },
+                        longitud             = f.optDouble("longitud").takeIf { !it.isNaN() },
+                        ultimaUbicacionFecha = f.optString("fecha").ifBlank { null },
+                        enLinea              = f.optBoolean("enLinea", false)
                     )
                 )
             }
-            Log.d("TvMqttSvc", "Sesión actualizada: $nombre | ${familiaresArray.length()} familiar(es)")
+            EstadoTv.setTelefono(true)
+            Log.d(TAG, "Sesión actualizada: $nombre | ${familiaresArray.length()} familiar(es)")
         } catch (e: Exception) {
-            Log.e("TvMqttSvc", "Error procesando sesión: ${e.message}")
+            Log.e(TAG, "Error procesando sesión: ${e.message}", e)
         }
     }
 
@@ -146,77 +257,166 @@ class TvMqttService : Service() {
             val id   = json.optString("usuarioId")
             val lat  = json.optDouble("latitud")
             val lng  = json.optDouble("longitud")
-            if (lat.isNaN() || lng.isNaN()) return
+            if (id.isBlank() || lat.isNaN() || lng.isNaN()) return
 
-            db.familiarTvDao().actualizarUbicacion(
-                id    = id,
-                lat   = lat,
-                lng   = lng,
-                fecha = json.optString("fecha", fmt.format(Date()))
-            )
+            val fecha = json.optString("fecha", fmt.format(Date()))
+
+            db.familiarTvDao().actualizarUbicacion(id = id, lat = lat, lng = lng, fecha = fecha)
+            db.familiarTvDao().marcarEnLinea(id, true)
+
+            EstadoTv.setTelefono(true)
+            Log.d(TAG, "📍 Ubicación de $id: $lat, $lng")
         } catch (e: Exception) {
-            Log.e("TvMqttSvc", "Error procesando ubicación: ${e.message}")
+            Log.e(TAG, "Error procesando ubicación: ${e.message}", e)
         }
     }
 
     /** Alerta de emergencia enviada desde el teléfono */
     private suspend fun procesarAlerta(payloadJson: String) {
         try {
-            val json = JSONObject(payloadJson)
+            val json         = JSONObject(payloadJson)
+            val emisorNombre = json.optString("emisorNombre").ifBlank { "Un familiar" }
+            val tipo         = json.optString("tipoAlerta").ifBlank { "SOS" }
+            val emisorId     = json.optString("emisorId")
+            val lat          = json.optDouble("latitud")
+            val lng          = json.optDouble("longitud")
+            val fecha        = json.optString("fecha", fmt.format(Date()))
+
             db.alertaTvDao().insertar(
                 AlertaTvEntity(
-                    id = json.optString("alertaId", UUID.randomUUID().toString()),
-                    tipo = json.optString("tipoAlerta"),
-                    descripcion = json.optString("descripcion"),
-                    emisorNombre = json.optString("emisorNombre"),
-                    emisorId = json.optString("emisorId"),
-                    latitud = json.optDouble("latitud").takeIf { !it.isNaN() },
-                    longitud = json.optDouble("longitud").takeIf { !it.isNaN() },
-                    fecha = json.optString("fecha", fmt.format(Date())),
-                    leida = false
+                    id           = json.optString("alertaId", UUID.randomUUID().toString()),
+                    tipo         = tipo,
+                    descripcion  = json.optString("descripcion"),
+                    emisorNombre = emisorNombre,
+                    emisorId     = emisorId,
+                    latitud      = lat.takeIf { !it.isNaN() },
+                    longitud     = lng.takeIf { !it.isNaN() },
+                    fecha        = fecha,
+                    leida        = false
                 )
             )
-            Log.d("TvMqttSvc", "Alerta recibida y guardada")
+
+            // Si venía con ubicación, aprovéchala para el mapa del emisor
+            if (emisorId.isNotBlank() && !lat.isNaN() && !lng.isNaN()) {
+                db.familiarTvDao().actualizarUbicacion(emisorId, lat, lng, fecha)
+            }
+
+            mostrarNotifAlerta(tipo, emisorNombre)
+            EstadoTv.setTelefono(true)
+            Log.d(TAG, "🚨 Alerta recibida de $emisorNombre")
         } catch (e: Exception) {
-            Log.e("TvMqttSvc", "Error procesando alerta: ${e.message}")
+            Log.e(TAG, "Error procesando alerta: ${e.message}", e)
+        }
+    }
+
+    /** Notificación informativa (no emergencia) */
+    private suspend fun procesarNotificacion(payloadJson: String) {
+        try {
+            val json = JSONObject(payloadJson)
+            db.notificacionTvDao().insertar(
+                NotificacionTvEntity(
+                    id       = json.optString("notificacionId", UUID.randomUUID().toString()),
+                    alertaId = json.optString("alertaId").ifBlank { null },
+                    titulo   = json.optString("titulo").ifBlank { "CompaSOS" },
+                    mensaje  = json.optString("mensaje"),
+                    tipo     = json.optString("tipo", "info"),
+                    fecha    = json.optString("fecha", fmt.format(Date())),
+                    leida    = false
+                )
+            )
+            EstadoTv.setTelefono(true)
+            Log.d(TAG, "🔔 Notificación recibida")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando notificación: ${e.message}", e)
+        }
+    }
+
+    /** Presencia del teléfono (incluye su Last Will cuando se muere) */
+    private fun procesarEstadoTelefono(payloadJson: String) {
+        try {
+            val online = JSONObject(payloadJson).optBoolean("online", false)
+            EstadoTv.setTelefono(online)
+            Log.d(TAG, if (online) "📱 Teléfono en línea" else "📱 Teléfono desconectado")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando estado del teléfono: ${e.message}")
         }
     }
 
     /** El teléfono confirma la vinculación con los datos del usuario */
     private suspend fun procesarRespuestaVinculacion(payloadJson: String) {
         try {
-            val json      = JSONObject(payloadJson)
-            val usuarioId = json.optString("usuarioId")
-            val nombre    = json.optString("nombre")
-            val email     = json.optString("email")
-
+            val json = JSONObject(payloadJson)
             db.configTvDao().confirmarVinculacion(
-                usuarioId = usuarioId,
-                nombre    = nombre,
-                email     = email,
+                usuarioId = json.optString("usuarioId"),
+                nombre    = json.optString("nombre"),
+                email     = json.optString("email"),
                 ts        = System.currentTimeMillis()
             )
-            Log.d("TvMqttSvc", "✅ TV vinculada con usuario: $nombre")
+            Log.d(TAG, "✅ TV vinculada con usuario: ${json.optString("nombre")}")
         } catch (e: Exception) {
-            Log.e("TvMqttSvc", "Error procesando vinculación: ${e.message}")
+            Log.e(TAG, "Error procesando vinculación: ${e.message}")
         }
     }
 
-    // ── Notificación persistente ───────────────────────────────────────────────
+    // ── Vigilancia de presencia ───────────────────────────────────────────────
+
+    /**
+     * Si el teléfono deja de mandar el latido, degradamos la UI en vez de
+     * seguir mostrando ubicaciones viejas como si fueran de ahorita.
+     */
+    private fun vigilarPresenciaTelefono() {
+        scope.launch {
+            while (isActive) {
+                delay(20_000)
+                val ultimo = EstadoTv.ultimoMensaje.value
+                if (ultimo > 0 &&
+                    System.currentTimeMillis() - ultimo > MqttConfig.TIMEOUT_TELEFONO_MS
+                ) {
+                    EstadoTv.setTelefono(false)
+                    val corte = fmt.format(
+                        Date(System.currentTimeMillis() - MqttConfig.TIMEOUT_TELEFONO_MS)
+                    )
+                    runCatching { db.familiarTvDao().marcarInactivosAntesDe(corte) }
+                }
+            }
+        }
+    }
+
+    // ── Notificaciones ────────────────────────────────────────────────────────
+
+    private fun mostrarNotifAlerta(tipo: String, emisor: String) {
+        val notif = NotificationCompat.Builder(this, CANAL_SOS)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("⚠️ Alerta $tipo")
+            .setContentText("$emisor necesita ayuda")
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .build()
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(System.currentTimeMillis().toInt(), notif)
+    }
 
     private fun notif() = NotificationCompat.Builder(this, CANAL)
         .setSmallIcon(android.R.drawable.ic_menu_compass)
         .setContentTitle("CompaSOS TV")
         .setContentText("Conectado — recibiendo datos del teléfono")
         .setPriority(NotificationCompat.PRIORITY_LOW)
+        .setOngoing(true)
         .build()
 
-    private fun crearCanal() {
+    private fun crearCanales() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                .createNotificationChannel(
-                    NotificationChannel(CANAL, "Servicio TV", NotificationManager.IMPORTANCE_LOW)
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                NotificationChannel(CANAL, "Servicio TV", NotificationManager.IMPORTANCE_LOW)
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    CANAL_SOS, "Alertas de emergencia",
+                    NotificationManager.IMPORTANCE_HIGH
                 )
+            )
         }
     }
 }
