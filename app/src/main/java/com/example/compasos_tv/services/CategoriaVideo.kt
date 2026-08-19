@@ -1,10 +1,17 @@
 package com.example.compasos_tv.services
 
 /**
+ * Representa una categoría del catálogo de videos de prevención/seguridad
+ * mostrado en `TvVideosScreen`.
+ *
  * Cada categoría define una búsqueda curada en YouTube.
- * Ajusta consultaBusqueda para afinar los resultados, o agrega
- * "&channelId=UCxxxx" en VideosSeguridadRepository para restringir
+ * Ajusta [consultaBusqueda] para afinar los resultados, o agrega
+ * "&channelId=UCxxxx" en `VideosSeguridadRepository` para restringir
  * a un canal oficial (Protección Civil, Cruz Roja, etc.).
+ *
+ * @property clave             identificador corto usado como clave en Room y en la UI.
+ * @property titulo             texto mostrado en el chip de categoría.
+ * @property consultaBusqueda  texto que se envía como parámetro `q` a la YouTube Data API v3.
  */
 data class CategoriaVideo(
     val clave: String,
@@ -12,6 +19,11 @@ data class CategoriaVideo(
     val consultaBusqueda: String
 )
 
+/**
+ * Catálogo fijo de todas las categorías de video disponibles en la app.
+ * Se usa como fuente única de verdad tanto para los chips de filtro como
+ * para las búsquedas en `VideosSeguridadRepository`.
+ */
 object CategoriasVideoSeguridad {
     val TODAS = listOf(
         CategoriaVideo(
