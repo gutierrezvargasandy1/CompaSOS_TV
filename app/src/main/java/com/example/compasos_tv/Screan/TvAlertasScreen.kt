@@ -51,7 +51,21 @@ private val ARojo      = Color(0xFFE53935)
 private val AAzul      = Color(0xFF1976D2)
 private val AVerde     = Color(0xFF4CAF50)
 
-/** Fila unificada: sirve tanto para alertas como para notificaciones. */
+/**
+ * Fila unificada de la bandeja de entrada: sirve tanto para representar una
+ * [com.example.compasos_tv.data.entitys.AlertaTvEntity] como una
+ * [com.example.compasos_tv.data.entitys.NotificacionTvEntity] con un mismo
+ * modelo de UI, para poder mostrarlas juntas y ordenadas por fecha.
+ *
+ * @property id        id original de la alerta o notificación.
+ * @property esAlerta  true si viene de la tabla de alertas (se dibuja en rojo).
+ * @property titulo    título mostrado en la tarjeta.
+ * @property subtitulo texto secundario (p. ej. "De: Juan"), solo en alertas.
+ * @property detalle   descripción/mensaje del ítem.
+ * @property coords    coordenadas formateadas, si el ítem trae ubicación.
+ * @property fecha     fecha/hora del ítem, usada para ordenar y mostrar.
+ * @property leida     true si el usuario ya la marcó como vista.
+ */
 data class ItemBandeja(
     val id: String,
     val esAlerta: Boolean,
@@ -65,6 +79,13 @@ data class ItemBandeja(
 
 // ── ViewModel ─────────────────────────────────────────────────────────────────
 
+/**
+ * ViewModel de [TvAlertasScreen]. Combina alertas y notificaciones de Room
+ * en una sola bandeja ordenada, y expone el estado de conexión para poder
+ * distinguir por qué la bandeja está vacía.
+ *
+ * @param app aplicación usada para obtener la instancia de [AppDatabaseTv].
+ */
 class TvAlertasViewModel(app: Application) : AndroidViewModel(app) {
 
     private val db = AppDatabaseTv.getInstance(app)
@@ -108,11 +129,13 @@ class TvAlertasViewModel(app: Application) : AndroidViewModel(app) {
         lista.sortedByDescending { it.fecha }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** Par (conectadoBroker, telefonoEnLinea), usado para distinguir las 3 causas de bandeja vacía. */
     val estadoConexion: StateFlow<Pair<Boolean, Boolean>> = combine(
         EstadoTv.conectadoBroker, EstadoTv.telefonoEnLinea
     ) { broker, telefono -> broker to telefono }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false to false)
 
+    /** Marca un [ItemBandeja] como leído en la tabla correspondiente (alerta o notificación). */
     fun marcarLeida(item: ItemBandeja) {
         viewModelScope.launch {
             if (item.esAlerta) db.alertaTvDao().marcarLeida(item.id)
@@ -120,6 +143,7 @@ class TvAlertasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Factory estándar para crear [TvAlertasViewModel] con `viewModel(factory = ...)`. */
     class Factory(private val app: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
@@ -129,6 +153,10 @@ class TvAlertasViewModel(app: Application) : AndroidViewModel(app) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
+/**
+ * Bandeja unificada de alertas de emergencia y notificaciones informativas,
+ * con indicadores de conexión al servidor y al teléfono.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun TvAlertasScreen() {
@@ -177,6 +205,8 @@ fun TvAlertasScreen() {
         }
 
         if (items.isEmpty()) {
+            // El mensaje cambia según la causa real de por qué no hay datos,
+            // en vez de mostrar siempre el mismo "sin alertas" genérico.
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -207,6 +237,7 @@ fun TvAlertasScreen() {
     }
 }
 
+/** Indicador circular verde/gris usado para mostrar un estado booleano de conexión. */
 @Composable
 private fun Punto(ok: Boolean) {
     Box(
@@ -215,6 +246,14 @@ private fun Punto(ok: Boolean) {
     )
 }
 
+/**
+ * Tarjeta de un ítem de la bandeja (alerta o notificación). El color de
+ * acento y el icono cambian según [ItemBandeja.esAlerta]; el borde resalta
+ * si el ítem no está leído o si tiene el foco del control remoto.
+ *
+ * @param item    ítem a mostrar.
+ * @param onClick acción ejecutada al confirmar con el control remoto (marca como leída).
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun ItemBandejaCard(item: ItemBandeja, onClick: () -> Unit) {
