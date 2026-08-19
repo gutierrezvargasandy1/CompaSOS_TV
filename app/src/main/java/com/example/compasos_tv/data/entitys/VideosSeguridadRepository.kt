@@ -12,12 +12,30 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
+/**
+ * Repositorio que combina caché local (Room) con la YouTube Data API v3
+ * para mostrar videos de prevención/seguridad en `TvVideosScreen`.
+ *
+ * Patrón usado: "cache-then-network". La UI siempre observa Room a través de
+ * [observarCategoria] (funciona incluso sin internet); por separado,
+ * [refrescarSiHaceFalta] dispara la llamada de red solo cuando el caché
+ * expiró, y si tiene éxito reemplaza los datos en Room, lo que hace que el
+ * Flow emita automáticamente los nuevos resultados.
+ *
+ * @param context contexto de la app, usado para leer la API key y acceder a Room.
+ */
 class VideosSeguridadRepository(private val context: Context) {
 
     private val dao = AppDatabaseTv.getInstance(context).videoTvDao()
 
     // 30 min: evita repetir búsquedas y gastar cuota de la API en cada visita a la pantalla
     private val vigenciaCacheMs = 60 * 1000L // 1 min mientras desarrollas — sube a 30 min antes de entregar
+
+    /**
+     * Observa (reactivamente) los videos guardados en Room para [categoria].
+     * No dispara ninguna llamada de red; para refrescar el contenido usar
+     * [refrescarSiHaceFalta].
+     */
     fun observarCategoria(categoria: String): Flow<List<VideoTvEntity>> =
         dao.observarPorCategoria(categoria)
 
@@ -25,6 +43,8 @@ class VideosSeguridadRepository(private val context: Context) {
      * Refresca la categoría desde YouTube Data API v3 si el caché expiró.
      * Si falla la red, no propaga la excepción: la UI se queda con lo
      * que ya haya en Room (observarCategoria sigue funcionando offline).
+     *
+     * @param categoria categoría a refrescar (clave + consulta de búsqueda curada).
      */
     suspend fun refrescarSiHaceFalta(categoria: CategoriaVideo) = withContext(Dispatchers.IO) {
         try {
@@ -69,6 +89,8 @@ class VideosSeguridadRepository(private val context: Context) {
             }
 
             if (videos.isNotEmpty()) {
+                // Se borra la categoría completa y se re-inserta: evita dejar
+                // videos "huérfanos" que ya no aparecen en los resultados nuevos.
                 dao.borrarCategoria(categoria.clave)
                 dao.insertarTodos(videos)
                 Log.d("VideosSeguridad", "${videos.size} video(s) cargados para '${categoria.clave}'")
@@ -78,6 +100,12 @@ class VideosSeguridadRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Ejecuta un GET a [urlStr] y devuelve el cuerpo parseado como JSON.
+     * Función interna de bajo nivel usada únicamente por [refrescarSiHaceFalta].
+     *
+     * @throws Exception si la conexión falla o el cuerpo no es JSON válido.
+     */
     private fun obtenerJson(urlStr: String): JSONObject {
         val conn = URL(urlStr).openConnection() as HttpURLConnection
         conn.connectTimeout = 10_000
