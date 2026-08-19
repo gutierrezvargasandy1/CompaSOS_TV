@@ -27,38 +27,58 @@ import java.util.*
  *   a) sin broker            → "Sin conexión al servidor"
  *   b) broker pero sin móvil → "Esperando al teléfono…"
  *   c) todo bien, sin datos  → "Conectado, esperando familiares…"
+ *
+ * Es un `object` (singleton) porque el estado de conexión es único para toda
+ * la app y se comparte entre servicio y pantallas Compose sin necesidad de
+ * un ViewModel intermedio.
  */
 object EstadoTv {
     private val _conectadoBroker = MutableStateFlow(false)
+    /** true si hay conexión activa con el broker MQTT. */
     val conectadoBroker = _conectadoBroker.asStateFlow()
 
     private val _telefonoEnLinea = MutableStateFlow(false)
+    /** true si el teléfono vinculado dio señales de vida recientemente. */
     val telefonoEnLinea = _telefonoEnLinea.asStateFlow()
 
     private val _ultimoMensaje = MutableStateFlow(0L)
+    /** Timestamp (epoch ms) del último mensaje MQTT recibido de cualquier tipo. */
     val ultimoMensaje = _ultimoMensaje.asStateFlow()
 
     private val _ultimoError = MutableStateFlow<String?>(null)
+    /** Último mensaje de error de conexión, o null si no hay errores pendientes. */
     val ultimoError = _ultimoError.asStateFlow()
 
+    /** Actualiza el estado de conexión con el broker. */
     fun setBroker(v: Boolean)   { _conectadoBroker.value = v }
+    /** Actualiza el estado de presencia del teléfono. */
     fun setTelefono(v: Boolean) { _telefonoEnLinea.value = v }
+    /** Registra que acaba de llegar un mensaje (para el watchdog de presencia). */
     fun latido()                { _ultimoMensaje.value = System.currentTimeMillis() }
+    /** Guarda el último error de conexión para mostrarlo en la UI. */
     fun setError(m: String?)    { _ultimoError.value = m }
 }
 
 /**
+ * Servicio en primer plano (Foreground Service) que mantiene viva la
+ * conexión MQTT de la TV y procesa todos los mensajes que llegan desde el
+ * teléfono vinculado: sesión, ubicaciones, alertas, notificaciones,
+ * presencia y confirmación de vinculación.
+ *
+ * Se inicia una sola vez desde `MainActivity.onCreate` mediante [iniciar] y
+ * corre en segundo plano durante toda la vida de la app (START_STICKY).
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  *  LA PANTALLA ESPERANDO DATOS DEL TELÉFONO
  * ═══════════════════════════════════════════════════════════════════════════
  *
- * Cambios respecto a tu versión, y qué resolvía cada uno:
+ * Cambios respecto a la versión anterior, y qué resolvía cada uno:
  *
  * 1. Usa MqttManager.instancia — UNA sola conexión compartida con
  *    VinculacionTvRepository. Antes eran dos, y la confirmación de vinculación
  *    caía en la que nadie escuchaba.
  *
- * 2. procesarRespuestaVinculacion() YA SE LLAMA. En tu código estaba escrita
+ * 2. procesarRespuestaVinculacion() YA SE LLAMA. Antes estaba escrita
  *    pero ninguna suscripción la invocaba: era código muerto.
  *
  * 3. Suscripción con wildcard `compasos/tv/{tvId}/#` y despacho por sufijo,
@@ -73,7 +93,9 @@ object EstadoTv {
  */
 class TvMqttService : Service() {
 
+    /** Scope de corrutinas propio del servicio; se cancela completo en [onDestroy]. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Conexión MQTT compartida con el resto de la app (ver [MqttManager]). */
     private val mqtt  = MqttManager.instancia
     private lateinit var db: AppDatabaseTv
     private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
@@ -84,6 +106,10 @@ class TvMqttService : Service() {
         private const val CANAL_SOS = "compasos_tv_sos"
         private const val NOTIF_ID  = 8001
 
+        /**
+         * Arranca este servicio como Foreground Service. Debe llamarse una
+         * sola vez, típicamente desde `MainActivity.onCreate`.
+         */
         fun iniciar(context: Context) {
             val intent = Intent(context, TvMqttService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -92,7 +118,11 @@ class TvMqttService : Service() {
                 context.startService(intent)
         }
 
-        /** ID único de esta TV basado en Android ID */
+        /**
+         * ID único de esta TV basado en Android ID.
+         * Se usa como sufijo en todos los topics MQTT propios de esta
+         * pantalla (ver [MqttConfig]).
+         */
         fun obtenerTvId(context: Context): String {
             val androidId = Settings.Secure.getString(
                 context.contentResolver, Settings.Secure.ANDROID_ID
@@ -101,6 +131,11 @@ class TvMqttService : Service() {
         }
     }
 
+    /**
+     * Inicializa la base de datos, los canales de notificación, arranca el
+     * servicio en primer plano, conecta el MQTT y comienza a vigilar la
+     * presencia del teléfono.
+     */
     override fun onCreate() {
         super.onCreate()
         db = AppDatabaseTv.getInstance(applicationContext)
@@ -110,10 +145,13 @@ class TvMqttService : Service() {
         vigilarPresenciaTelefono()
     }
 
+    /** El sistema debe volver a crear el servicio si lo mata por falta de recursos. */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
 
+    /** No es un servicio "bindeable"; solo corre en background. */
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** Libera corrutinas y cierra la conexión MQTT al destruirse el servicio. */
     override fun onDestroy() {
         scope.cancel()
         mqtt.desconectar()
@@ -123,6 +161,11 @@ class TvMqttService : Service() {
 
     // ── MQTT ──────────────────────────────────────────────────────────────────
 
+    /**
+     * Conecta al broker MQTT y suscribe todos los topics necesarios para
+     * esta TV. Si la conexión falla, reintenta con backoff exponencial
+     * (hasta 30 s entre intentos) en vez de morir silenciosamente.
+     */
     private fun conectarYSuscribir() {
         scope.launch {
             val tvId = obtenerTvId(applicationContext)
@@ -131,6 +174,8 @@ class TvMqttService : Service() {
                 EstadoTv.setBroker(true)
                 EstadoTv.setError(null)
                 scope.launch {
+                    // Publica el "online" retained en el topic de estado propio,
+                    // así cualquier suscriptor nuevo sabe de inmediato que la TV está viva.
                     mqtt.publicarSeguro(
                         MqttConfig.topicEstadoTv(tvId),
                         JSONObject().put("online", true)
@@ -182,14 +227,20 @@ class TvMqttService : Service() {
         }
     }
 
-    /** Reparte el mensaje según el tramo del topic después del tvId. */
+    /**
+     * Reparte el mensaje según el tramo del topic después del tvId, es decir,
+     * según el cuarto segmento de rutas como:
+     *   compasos/tv/{tvId}/sesion
+     *   compasos/tv/{tvId}/ubicacion/{usuarioId}
+     *   compasos/tv/{tvId}/alerta
+     *   compasos/tv/{tvId}/notificacion
+     *   compasos/tv/{tvId}/telefono_estado
+     *   compasos/tv/{tvId}/estado          ← el nuestro, se ignora
+     *
+     * @param topic   topic completo del mensaje recibido.
+     * @param payload cuerpo del mensaje (JSON en texto plano).
+     */
     private suspend fun despachar(topic: String, payload: String) {
-        // compasos/tv/{tvId}/sesion
-        // compasos/tv/{tvId}/ubicacion/{usuarioId}
-        // compasos/tv/{tvId}/alerta
-        // compasos/tv/{tvId}/notificacion
-        // compasos/tv/{tvId}/telefono_estado
-        // compasos/tv/{tvId}/estado          ← el nuestro, se ignora
         val sub = topic.split("/").getOrNull(3) ?: return
 
         when (sub) {
@@ -205,7 +256,13 @@ class TvMqttService : Service() {
 
     // ── Procesadores ──────────────────────────────────────────────────────────
 
-    /** Sesión: usuario + lista de familiares con ubicación */
+    /**
+     * Procesa un mensaje de sesión: datos del usuario vinculado más la lista
+     * completa de familiares con su ubicación (snapshot periódico enviado
+     * por el teléfono).
+     *
+     * @param payloadJson JSON con forma { nombre, email, familiares: [...] }.
+     */
     private suspend fun procesarSesion(payloadJson: String) {
         try {
             val json   = JSONObject(payloadJson)
@@ -250,7 +307,12 @@ class TvMqttService : Service() {
         }
     }
 
-    /** Ubicación en vivo de un familiar específico */
+    /**
+     * Ubicación en vivo de un familiar específico, enviada cada vez que el
+     * teléfono de ese familiar reporta una nueva posición GPS.
+     *
+     * @param payloadJson JSON con forma { usuarioId, latitud, longitud, fecha }.
+     */
     private suspend fun procesarUbicacion(payloadJson: String) {
         try {
             val json = JSONObject(payloadJson)
@@ -271,7 +333,14 @@ class TvMqttService : Service() {
         }
     }
 
-    /** Alerta de emergencia enviada desde el teléfono */
+    /**
+     * Alerta de emergencia (SOS) enviada desde el teléfono. Se guarda en
+     * Room, opcionalmente actualiza la ubicación del emisor, y dispara una
+     * notificación de alta prioridad ([mostrarNotifAlerta]).
+     *
+     * @param payloadJson JSON con forma { alertaId, tipoAlerta, descripcion,
+     *        emisorNombre, emisorId, latitud, longitud, fecha }.
+     */
     private suspend fun procesarAlerta(payloadJson: String) {
         try {
             val json         = JSONObject(payloadJson)
@@ -309,7 +378,13 @@ class TvMqttService : Service() {
         }
     }
 
-    /** Notificación informativa (no emergencia) */
+    /**
+     * Notificación informativa (no emergencia), p. ej. avisos o cambios en
+     * la familia.
+     *
+     * @param payloadJson JSON con forma { notificacionId, alertaId, titulo,
+     *        mensaje, tipo, fecha }.
+     */
     private suspend fun procesarNotificacion(payloadJson: String) {
         try {
             val json = JSONObject(payloadJson)
@@ -331,7 +406,12 @@ class TvMqttService : Service() {
         }
     }
 
-    /** Presencia del teléfono (incluye su Last Will cuando se muere) */
+    /**
+     * Presencia del teléfono (incluye su Last Will cuando se desconecta
+     * abruptamente, p. ej. se apaga o pierde red).
+     *
+     * @param payloadJson JSON con forma { online: Boolean }.
+     */
     private fun procesarEstadoTelefono(payloadJson: String) {
         try {
             val online = JSONObject(payloadJson).optBoolean("online", false)
@@ -342,7 +422,14 @@ class TvMqttService : Service() {
         }
     }
 
-    /** El teléfono confirma la vinculación con los datos del usuario */
+    /**
+     * El teléfono confirma la vinculación con los datos del usuario.
+     * Este método existía en versiones anteriores pero nunca se llamaba
+     * (código muerto); ahora sí se invoca desde la suscripción registrada en
+     * [conectarYSuscribir].
+     *
+     * @param payloadJson JSON con forma { usuarioId, nombre, email }.
+     */
     private suspend fun procesarRespuestaVinculacion(payloadJson: String) {
         try {
             val json = JSONObject(payloadJson)
@@ -363,6 +450,10 @@ class TvMqttService : Service() {
     /**
      * Si el teléfono deja de mandar el latido, degradamos la UI en vez de
      * seguir mostrando ubicaciones viejas como si fueran de ahorita.
+     *
+     * Corre en un loop infinito dentro del [scope] del servicio, revisando
+     * cada 20 segundos si pasó más de [MqttConfig.TIMEOUT_TELEFONO_MS] desde
+     * el último mensaje recibido.
      */
     private fun vigilarPresenciaTelefono() {
         scope.launch {
@@ -384,6 +475,7 @@ class TvMqttService : Service() {
 
     // ── Notificaciones ────────────────────────────────────────────────────────
 
+    /** Muestra una notificación de alta prioridad para una alerta de emergencia. */
     private fun mostrarNotifAlerta(tipo: String, emisor: String) {
         val notif = NotificationCompat.Builder(this, CANAL_SOS)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
@@ -397,6 +489,7 @@ class TvMqttService : Service() {
             .notify(System.currentTimeMillis().toInt(), notif)
     }
 
+    /** Notificación persistente y de baja prioridad requerida por el Foreground Service. */
     private fun notif() = NotificationCompat.Builder(this, CANAL)
         .setSmallIcon(android.R.drawable.ic_menu_compass)
         .setContentTitle("CompaSOS TV")
@@ -405,6 +498,7 @@ class TvMqttService : Service() {
         .setOngoing(true)
         .build()
 
+    /** Crea los canales de notificación requeridos en Android 8+ (servicio y alertas SOS). */
     private fun crearCanales() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
