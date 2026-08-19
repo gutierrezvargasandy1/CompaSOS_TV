@@ -8,6 +8,12 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Typography
 
 // Set of Material typography styles to start with
+
+/**
+ * Estilos tipográficos usados por [CompaSOS_TVTheme]. Actualmente solo
+ * personaliza `bodyLarge`; el resto de estilos (titleLarge, labelSmall,
+ * etc.) queda comentado como referencia para extenderlo si se necesita.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 val Typography = Typography(
     bodyLarge = TextStyle(
