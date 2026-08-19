@@ -36,8 +36,15 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.example.compasos_tv.Navigation.TvScreen
 
+/**
+ * Representa una entrada del menú lateral de navegación.
+ *
+ * @property pantalla ruta/pantalla de [TvScreen] a la que apunta este ítem.
+ * @property icono    icono mostrado junto al título de la pantalla.
+ */
 data class TvNavItem(val pantalla: TvScreen, val icono: ImageVector)
 
+/** Lista fija de ítems que aparecen en el menú lateral, en orden de aparición. */
 private val itemsNav = listOf(
     TvNavItem(TvScreen.Dashboard,        Icons.Filled.Home),
     TvNavItem(TvScreen.AlertasRecibidas, Icons.Filled.Notifications),
@@ -55,6 +62,19 @@ private val ColorTexto        = Color(0xFFE0E0E0)
 private val ColorTextoSecund  = Color(0xFF9E9E9E)
 private val ColorRojo         = Color(0xFFE53935)
 
+/**
+ * Layout compartido por (casi) todas las pantallas de la app: dibuja el
+ * menú lateral de navegación con foco compatible con control remoto, y deja
+ * un área de contenido a la derecha donde se inyecta la pantalla real
+ * mediante el parámetro [contenido].
+ *
+ * @param navController    controlador de navegación usado para cambiar de pantalla.
+ * @param rutaSeleccionada ruta actualmente activa, para resaltar el ítem correspondiente.
+ * @param padContent       si true, aplica padding al área de contenido; si
+ *        false, el contenido ocupa todo el espacio disponible (usado por el
+ *        Dashboard, cuyo mapa debe llegar hasta los bordes).
+ * @param contenido        Composable de la pantalla actual que se muestra a la derecha del menú.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun TvMainScreen(
@@ -142,6 +162,14 @@ fun TvMainScreen(
     }
 }
 
+/**
+ * Fila individual del menú lateral. Maneja su propio estado de foco/hover y
+ * responde a Enter/DirectionCenter del control remoto para navegar.
+ *
+ * @param item         ítem de menú a dibujar (pantalla + icono).
+ * @param seleccionado true si es la pantalla actualmente activa.
+ * @param onClick      acción a ejecutar al confirmar la selección.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun TvNavItemRow(
