@@ -50,10 +50,22 @@ private val CRojo    = Color(0xFFE53935)
 
 // ── ViewModel ─────────────────────────────────────────────────────────────────
 
+/**
+ * ViewModel de [TvConfiguracionScreen]. Expone la configuración/vinculación
+ * actual y la acción de desvincular la TV.
+ *
+ * @param app aplicación usada para construir [VinculacionTvRepository].
+ */
 class TvConfigViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = VinculacionTvRepository(app)
+    /** Configuración/vinculación actual, observada reactivamente desde Room. */
     val config       = repo.observarConfig()
 
+    /**
+     * Desvincula la TV (borra la sesión guardada y limpia el retained MQTT)
+     * y, al terminar, ejecuta [onListo] para que la pantalla navegue de
+     * vuelta a la vinculación.
+     */
     fun desvincular(onListo: () -> Unit) {
         viewModelScope.launch {
             repo.desvincular()
@@ -61,6 +73,7 @@ class TvConfigViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Factory estándar para crear [TvConfigViewModel] con `viewModel(factory = ...)`. */
     class Factory(private val app: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
@@ -70,6 +83,15 @@ class TvConfigViewModel(app: Application) : AndroidViewModel(app) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
+/**
+ * Pantalla de configuración de la TV: muestra información del dispositivo,
+ * la cuenta vinculada, y permite desvincular la pantalla (con confirmación
+ * previa) mediante [onDesvincular].
+ *
+ * @param onDesvincular callback invocado cuando el usuario confirma la
+ *        desvinculación, usado por la navegación para volver a la pantalla
+ *        de vinculación.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun TvConfiguracionScreen(onDesvincular: () -> Unit) {
@@ -81,6 +103,8 @@ fun TvConfiguracionScreen(onDesvincular: () -> Unit) {
     val tvId   = remember {
         Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
     }
+    // Controla si se muestra el panel de "¿Desvincular esta pantalla?" antes
+    // de ejecutar la acción, para evitar desvinculaciones accidentales.
     var confirmar by remember { mutableStateOf(false) }
 
     Row(
@@ -150,6 +174,8 @@ fun TvConfiguracionScreen(onDesvincular: () -> Unit) {
                         onClick = { confirmar = true }
                     )
                 } else {
+                    // Panel de confirmación: evita que un solo click accidental
+                    // desvincule la TV sin querer.
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -184,6 +210,13 @@ fun TvConfiguracionScreen(onDesvincular: () -> Unit) {
     }
 }
 
+/**
+ * Contenedor de tarjeta con título en mayúsculas, usado para agrupar filas
+ * de información relacionadas (ver [FilaInfo]).
+ *
+ * @param titulo    encabezado de la sección (se muestra en mayúsculas).
+ * @param contenido filas de información que se dibujan dentro de la tarjeta.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun SeccionInfo(titulo: String, contenido: @Composable ColumnScope.() -> Unit) {
@@ -199,6 +232,10 @@ private fun SeccionInfo(titulo: String, contenido: @Composable ColumnScope.() ->
     }
 }
 
+/**
+ * Fila simple "icono + etiqueta + valor", usada dentro de [SeccionInfo]
+ * para mostrar datos de solo lectura (dispositivo, cuenta vinculada, etc.).
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun FilaInfo(icono: ImageVector, etiqueta: String, valor: String) {
@@ -213,6 +250,17 @@ private fun FilaInfo(icono: ImageVector, etiqueta: String, valor: String) {
     }
 }
 
+/**
+ * Botón enfocable con soporte de control remoto (Enter/DirectionCenter),
+ * usado para las acciones de esta pantalla (desvincular, confirmar, cancelar).
+ *
+ * @param icono    icono mostrado a la izquierda del texto.
+ * @param texto    etiqueta del botón.
+ * @param colorBg  color de fondo en estado normal.
+ * @param colorTx  color del texto/icono.
+ * @param modifier modificador adicional (p. ej. `Modifier.weight(1f)` en filas).
+ * @param onClick  acción ejecutada al confirmar con el control remoto.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun BotonConfig(
