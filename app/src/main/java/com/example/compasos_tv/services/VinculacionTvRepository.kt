@@ -12,17 +12,23 @@ import kotlinx.coroutines.flow.Flow
 import org.json.JSONObject
 
 /**
- * Cambios respecto a tu versión:
+ * Repositorio encargado del flujo de vinculación TV ↔ teléfono a través de
+ * MQTT: publica la solicitud con el código ingresado en la TV y espera la
+ * confirmación del teléfono.
+ *
+ * Cambios respecto a la versión anterior:
  *
  * 1. Usa MqttManager.instancia — la MISMA conexión que TvMqttService. Antes
  *    creaba su propio manager: dos conexiones, y la confirmación llegaba a una
  *    mientras el servicio escuchaba en la otra.
  *
- * 2. REINTENTA la solicitud cada 3 s hasta 60 s. Antes publicabas una sola vez:
- *    si el teléfono todavía no estaba suscrito en ese milisegundo, el mensaje
- *    se perdía y la TV se quedaba esperando para siempre.
+ * 2. REINTENTA la solicitud cada 3 s hasta 60 s. Antes se publicaba una sola
+ *    vez: si el teléfono todavía no estaba suscrito en ese milisegundo, el
+ *    mensaje se perdía y la TV se quedaba esperando para siempre.
  *
  * 3. Devuelve Boolean para que la pantalla sepa si hubo timeout.
+ *
+ * @param context contexto de la app, usado para Room y para obtener el id de la TV.
  */
 class VinculacionTvRepository(private val context: Context) {
 
@@ -36,13 +42,22 @@ class VinculacionTvRepository(private val context: Context) {
         private const val TIMEOUT_MS   = 60_000L
     }
 
+    /** Observa reactivamente la configuración/estado de vinculación actual. */
     fun observarConfig(): Flow<ConfigTvEntity?> = dao.observar()
 
     /**
      * El código lo genera y muestra el TELÉFONO. El usuario lo lee ahí y lo
      * escribe aquí en la TV.
      *
-     * @return true si el teléfono confirmó dentro del timeout.
+     * Publica repetidamente (cada [REINTENTO_MS]) la solicitud de
+     * vinculación con [codigo] hasta que el teléfono responda o se cumpla
+     * [TIMEOUT_MS], lo que ocurra primero.
+     *
+     * @param codigo      código ingresado por el usuario en la TV.
+     * @param onConfirmada callback invocado con los datos del usuario en
+     *        cuanto el teléfono confirma la vinculación.
+     * @return true si el teléfono confirmó dentro del timeout, false si hubo
+     *         timeout o no fue posible conectar al broker.
      */
     suspend fun solicitarVinculacion(
         codigo: String,
@@ -100,6 +115,9 @@ class VinculacionTvRepository(private val context: Context) {
             put("modelo", Build.MODEL)
         }.toString()
 
+        // Corrutina hija que re-publica la solicitud cada REINTENTO_MS mientras
+        // no llegue confirmación, para cubrir el caso en que el teléfono aún
+        // no estaba suscrito al topic cuando se publicó el primer intento.
         val reintentos = launch {
             while (isActive) {
                 mqtt.publicarSeguro(MqttConfig.topicSolicitud(codigo), payload)
@@ -120,6 +138,11 @@ class VinculacionTvRepository(private val context: Context) {
         ok
     }
 
+    /**
+     * Desvincula esta TV: cancela la suscripción de respuesta, limpia el
+     * mensaje retained del broker (para que la TV no reviva datos viejos al
+     * reiniciar) y borra la configuración guardada en Room.
+     */
     suspend fun desvincular() = withContext(Dispatchers.IO) {
         val tvId = TvMqttService.obtenerTvId(context)
         dao.obtener()?.codigoVinculacion?.takeIf { it.isNotBlank() }?.let {
