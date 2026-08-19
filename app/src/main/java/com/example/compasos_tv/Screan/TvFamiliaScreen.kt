@@ -40,11 +40,21 @@ private val FGris    = Color(0xFF424242)
 
 // ── ViewModel ─────────────────────────────────────────────────────────────────
 
+/**
+ * ViewModel de [TvFamiliaScreen]. Expone la lista de familiares y la
+ * configuración actual directamente como Flows de Room, sin lógica
+ * adicional: esta pantalla es de solo lectura.
+ *
+ * @param app aplicación usada para obtener la instancia de [AppDatabaseTv].
+ */
 class TvFamiliaViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabaseTv.getInstance(app)
+    /** Lista reactiva de familiares vinculados con su última ubicación. */
     val familiares = db.familiarTvDao().observarTodos()
+    /** Configuración/vinculación actual (usada para mostrar el nombre de cuenta). */
     val config     = db.configTvDao().observar()
 
+    /** Factory estándar para crear [TvFamiliaViewModel] con `viewModel(factory = ...)`. */
     class Factory(private val app: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
@@ -54,6 +64,10 @@ class TvFamiliaViewModel(app: Application) : AndroidViewModel(app) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
+/**
+ * Pantalla que muestra la cuadrícula de integrantes de la familia vinculada,
+ * con su estado de conexión y última ubicación conocida.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun TvFamiliaScreen() {
@@ -96,6 +110,7 @@ fun TvFamiliaScreen() {
         }
 
         if (familiares.isEmpty()) {
+            // Estado vacío: aún no llegó ningún snapshot de familiares por MQTT.
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -120,6 +135,12 @@ fun TvFamiliaScreen() {
     }
 }
 
+/**
+ * Tarjeta individual de un familiar: avatar con inicial, nombre, estado de
+ * conexión y última ubicación conocida.
+ *
+ * @param familiar datos del familiar a mostrar.
+ */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun FamiliarCard(familiar: FamiliarTvEntity) {
