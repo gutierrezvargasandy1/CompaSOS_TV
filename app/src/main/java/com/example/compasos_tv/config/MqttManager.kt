@@ -6,18 +6,27 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * Envoltorio (wrapper) sobre el cliente MQTT de Paho que administra UNA sola
+ * conexión al broker para toda la app de TV, con reconexión automática y
+ * re-suscripción a los topics ya registrados.
+ *
  * EL BUG MÁS IMPORTANTE QUE ESTO ARREGLA:
  *
- * TvMqttService creaba un MqttManager y VinculacionTvRepository creaba OTRO.
- * Eran dos conexiones distintas al broker, con suscripciones separadas: la
- * respuesta de vinculación llegaba a una mientras el servicio escuchaba en la
- * otra. Ahora hay UNA sola instancia compartida: MqttManager.instancia
+ * `TvMqttService` creaba un `MqttManager` y `VinculacionTvRepository` creaba
+ * OTRO. Eran dos conexiones distintas al broker, con suscripciones
+ * separadas: la respuesta de vinculación llegaba a una mientras el servicio
+ * escuchaba en la otra. Ahora hay UNA sola instancia compartida, accesible
+ * mediante [instancia] (patrón singleton).
  *
  * Además:
- *  - Re-suscripción automática al reconectar. Con isAutomaticReconnect +
- *    cleanSession=true, al parpadear el WiFi Paho reconecta pero el broker ya
- *    olvidó tus suscripciones: la pantalla se queda congelada "conectada".
- *  - retained y Last Will.
+ *  - Re-suscripción automática al reconectar. Con `isAutomaticReconnect` +
+ *    `cleanSession = true`, al parpadear el WiFi Paho reconecta pero el
+ *    broker ya olvidó tus suscripciones: la pantalla se queda congelada
+ *    "conectada" sin recibir nada. [reaplicarSuscripciones] soluciona esto.
+ *  - Soporte de mensajes retained y de Last Will and Testament (LWT).
+ *
+ * El constructor es privado: la única forma de obtener una instancia es a
+ * través de [instancia].
  */
 class MqttManager private constructor() {
 
@@ -28,16 +37,39 @@ class MqttManager private constructor() {
         val instancia: MqttManager by lazy { MqttManager() }
     }
 
+    /** Cliente Paho actualmente conectado, o null si no hay conexión activa. */
     private var client: MqttClient? = null
+
+    /** Registro de topic → callback, usado para re-suscribir tras reconectar. */
     private val suscripciones = ConcurrentHashMap<String, (String, String) -> Unit>()
+
+    /** Callback opcional invocado cada vez que se completa una conexión. */
     private var onConexion: ((reconectado: Boolean) -> Unit)? = null
 
+    /** true si el cliente MQTT está actualmente conectado al broker. */
     val estaConectado: Boolean
         get() = client?.isConnected == true
 
+    /**
+     * Registra un callback que se dispara cada vez que se conecta (o
+     * reconecta) con el broker.
+     *
+     * @param bloque recibe `true` si fue una reconexión, `false` si fue la
+     *        primera conexión.
+     */
     fun alConectar(bloque: (reconectado: Boolean) -> Unit) { onConexion = bloque }
 
-    /** Llamar siempre desde Dispatchers.IO */
+    /**
+     * Abre la conexión con el broker MQTT configurado en [MqttConfig].
+     * No hace nada si ya había una conexión activa.
+     *
+     * Llamar siempre desde Dispatchers.IO (es una operación bloqueante).
+     *
+     * @param clientId   identificador único del cliente ante el broker.
+     * @param lwtTopic   topic del Last Will (mensaje que el broker publica
+     *                   automáticamente si esta TV se desconecta abruptamente).
+     * @param lwtPayload contenido del mensaje de Last Will.
+     */
     @Synchronized
     @JvmOverloads
     fun conectar(
@@ -78,6 +110,11 @@ class MqttManager private constructor() {
         Log.d(TAG, "Conectado al broker como $clientId")
     }
 
+    /**
+     * Vuelve a suscribirse a todos los topics registrados en [suscripciones].
+     * Se invoca automáticamente tras una reconexión, porque `cleanSession =
+     * true` hace que el broker olvide las suscripciones anteriores.
+     */
     private fun reaplicarSuscripciones() {
         val c = client ?: return
         suscripciones.forEach { (topic, cb) ->
@@ -92,6 +129,16 @@ class MqttManager private constructor() {
         }
     }
 
+    /**
+     * Publica un mensaje en [topic]. Lanza excepción si no hay conexión
+     * activa (usar [publicarSeguro] si no se quiere manejar la excepción).
+     *
+     * @param topic    topic destino.
+     * @param payload  contenido del mensaje (texto plano, normalmente JSON).
+     * @param qos      calidad de servicio (por defecto [MqttConfig.QOS]).
+     * @param retained si true, el broker conserva este mensaje como el
+     *                 "último valor conocido" del topic para nuevos suscriptores.
+     */
     @JvmOverloads
     fun publicar(
         topic: String,
@@ -107,6 +154,13 @@ class MqttManager private constructor() {
         Log.d(TAG, "► [$topic]${if (retained) "(retained)" else ""}: $payload")
     }
 
+    /**
+     * Igual que [publicar], pero atrapa cualquier excepción y la reporta
+     * como resultado booleano en vez de propagarla. Útil quando el caller
+     * no puede permitirse un crash si el broker no está disponible.
+     *
+     * @return true si el mensaje se publicó correctamente, false si falló.
+     */
     @JvmOverloads
     fun publicarSeguro(
         topic: String, payload: String,
@@ -117,6 +171,13 @@ class MqttManager private constructor() {
         Log.e(TAG, "No se pudo publicar en $topic: ${e.message}"); false
     }
 
+    /**
+     * Se suscribe a [topic] y registra [onMensaje] para que se re-aplique
+     * automáticamente si la conexión se cae y se restablece.
+     *
+     * @param onMensaje callback invocado con (topic, payload) por cada
+     *        mensaje recibido en ese topic.
+     */
     fun suscribir(topic: String, onMensaje: (String, String) -> Unit) {
         val c = client ?: throw IllegalStateException("MQTT no conectado")
         suscripciones[topic] = onMensaje
@@ -128,6 +189,7 @@ class MqttManager private constructor() {
         Log.d(TAG, "Suscrito a: $topic")
     }
 
+    /** Cancela la suscripción a [topic] y lo quita del registro de re-suscripción. */
     fun desuscribir(topic: String) {
         try {
             suscripciones.remove(topic)
@@ -137,6 +199,7 @@ class MqttManager private constructor() {
         }
     }
 
+    /** Cierra la conexión con el broker y limpia todas las suscripciones registradas. */
     fun desconectar() {
         try { client?.takeIf { it.isConnected }?.disconnect() } catch (_: Exception) {}
         suscripciones.clear()
